@@ -1,0 +1,1877 @@
+//! Entity extraction helpers for `update_from_world()`.
+//!
+//! Each method examines one entity type and pushes draw calls into the
+//! appropriate draw-list on `SceneRenderer`.
+
+use super::helpers::{
+    extract_bounds_info, mat4_inv_transpose, parse_blend_mode, MaterialOverride, BLEND_MODES,
+};
+use super::{
+    draw_list::echo_order, hash_parts, transform_aabb, Blend, CachedBoneBind, Draw, DrawItem,
+    EchoDrawCall, Layer, SceneRenderer, SkinnedDrawCall, SHADOW_BONE_KEY, SKINNED_DRAW_KEY,
+};
+use crate::billboard_pipeline::{BillboardDrawCall, BillboardUniforms, SpriteInstance};
+use crate::bitmap_font::{
+    anchor_origin, apply_fill, FILL_DIRECTIONS, SCREEN_ANCHORS, SPRITE_MODES, TEXT_ALIGNS,
+};
+use crate::pipeline::{BlendMode, MaterialUniforms, TransformUniforms};
+use crate::primitives::{
+    create_box_mesh, create_wireframe_box_mesh, generate_normal_arrows,
+    triangles_to_wireframe_indices, Mesh,
+};
+use crate::sprite2d_pipeline::Sprite2dInstanceGpu;
+use crate::texture_cache::TextureCache;
+use flint_core::components as comp;
+use flint_core::EntityId;
+use flint_ecs::{ComponentView, FlintWorld};
+use std::sync::Arc;
+use wgpu::util::DeviceExt;
+
+impl SceneRenderer {
+    /// The colour that replaces a model entity's base colour, from its
+    /// `material`: the script-set `base_color_r/g/b[/a]` first, then the
+    /// scene's `color = [r, g, b(, a)]` (#884), the same key a bounds-drawn
+    /// entity takes. The entity first, then its parent, so expanded GLB child
+    /// nodes inherit the root's colour; a parent's `color` only when the
+    /// parent has a `model` too, since on a bounds-drawn parent it is the
+    /// colour of that parent's own box. `None` when nothing declares one.
+    ///
+    /// Read through the typed view (#685): `base_color_r = 1`, an integer,
+    /// used to drop the whole colour, because each channel was read with
+    /// `as_float`. A channel of the wrong type still means no tint, and is
+    /// reported once.
+    pub(crate) fn ecs_base_color_override(
+        world: &FlintWorld,
+        entity_id: EntityId,
+    ) -> Option<[f32; 4]> {
+        let scalars = |id: EntityId| -> Option<[f32; 4]> {
+            let m = world.view(id, comp::MATERIAL);
+            let r = m.opt_f32("base_color_r")?;
+            let g = m.opt_f32("base_color_g")?;
+            let b = m.opt_f32("base_color_b")?;
+            let a = m.f32("base_color_a", 1.0);
+            Some([r, g, b, a])
+        };
+        let color = |id: EntityId| world.view(id, comp::MATERIAL).opt_color("color");
+        let own = |id: EntityId| scalars(id).or_else(|| color(id));
+        own(entity_id).or_else(|| {
+            let parent = world.get_parent(entity_id)?;
+            scalars(parent).or_else(|| {
+                world
+                    .get_components(parent)
+                    .is_some_and(|c| c.has(comp::MODEL))
+                    .then(|| color(parent))
+                    .flatten()
+            })
+        })
+    }
+
+    /// ECS `material.emissive_scale` for a model entity (ADR 0090), on the
+    /// entity and then its parent like the tint above, read every frame so
+    /// a game can change a mesh's glow after upload. 1 when neither sets
+    /// one; negative values count as 0.
+    pub(super) fn ecs_emissive_scale(world: &FlintWorld, entity_id: EntityId) -> f32 {
+        Self::ecs_material_f32(world, entity_id, "emissive_scale")
+            .unwrap_or(1.0)
+            .max(0.0)
+    }
+
+    /// ECS `material.glow_surface` for a model entity (ADR 0096): how much
+    /// of each per-vertex light part is lit surface too, read every frame
+    /// and inherited like `emissive_scale`. 0 when neither sets one;
+    /// clamped to 0..1.
+    pub(super) fn ecs_glow_surface(world: &FlintWorld, entity_id: EntityId) -> f32 {
+        Self::ecs_material_f32(world, entity_id, "glow_surface")
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
+    }
+
+    /// ECS `material.vertex_tint_r/g/b` for a model entity (ADR 0102): what
+    /// its vertex colours are multiplied by, surface and per-vertex light
+    /// alike, read every frame and inherited like `emissive_scale`. All
+    /// three or none; white when neither sets one. Negatives count as 0.
+    pub(super) fn ecs_vertex_tint(world: &FlintWorld, entity_id: EntityId) -> [f32; 4] {
+        let read = |id: EntityId| {
+            let m = world.view(id, comp::MATERIAL);
+            let c = |k: &str| m.opt_f32(k).map(|v| v.max(0.0));
+            Some([
+                c("vertex_tint_r")?,
+                c("vertex_tint_g")?,
+                c("vertex_tint_b")?,
+                1.0,
+            ])
+        };
+        read(entity_id)
+            .or_else(|| world.get_parent(entity_id).and_then(read))
+            .unwrap_or([1.0; 4])
+    }
+
+    /// ECS `material.unlit` for an entity (#627), on it and then its parent
+    /// like `cast_shadows`: true draws its base colour times its
+    /// `emissive_scale`, with no lighting. False when neither sets one.
+    pub(super) fn ecs_unlit(world: &FlintWorld, entity_id: EntityId) -> bool {
+        let read = |id: EntityId| world.view(id, comp::MATERIAL).opt_bool("unlit");
+        read(entity_id)
+            .or_else(|| world.get_parent(entity_id).and_then(read))
+            .unwrap_or(false)
+    }
+
+    /// Mark `material` unlit when the entity asks for it (#627).
+    fn apply_unlit(world: &FlintWorld, entity_id: EntityId, material: &mut MaterialUniforms) {
+        if Self::ecs_unlit(world, entity_id) {
+            material.set_unlit(Self::ecs_emissive_scale(world, entity_id));
+        }
+    }
+
+    /// A bounds box's own light (#797): its `material.emissive`, linear RGB
+    /// added after lighting (above 1 is what bloom takes up), times
+    /// `material.emissive_scale`. Unset leaves the uniforms as they were, so
+    /// a box without it draws the same bytes as before.
+    fn apply_box_emission(
+        world: &FlintWorld,
+        entity_id: EntityId,
+        material: &mut MaterialUniforms,
+    ) {
+        let Some([r, g, b, _]) = world.view(entity_id, comp::MATERIAL).opt_color("emissive") else {
+            return;
+        };
+        material.emissive = [r.max(0.0), g.max(0.0), b.max(0.0), 0.0];
+        material.scale_emission(Self::ecs_emissive_scale(world, entity_id));
+    }
+
+    /// ECS `material.cast_shadows` for an entity (ADR 0100): false keeps
+    /// its draws out of the shadow cascades, opaque, transparent and
+    /// skinned alike. True when neither it nor its parent sets one, so a GLB
+    /// expanded into child nodes stops casting as one.
+    pub(super) fn ecs_casts_shadow(world: &FlintWorld, entity_id: EntityId) -> bool {
+        let read = |id: EntityId| world.view(id, comp::MATERIAL).opt_bool("cast_shadows");
+        read(entity_id)
+            .or_else(|| world.get_parent(entity_id).and_then(read))
+            .unwrap_or(true)
+    }
+
+    /// The `lod.draw_distance` of `entity_id`, or else of its parent (a
+    /// multi-node model's nodes are children of the entity that named it).
+    /// Zero, negative or absent: no limit.
+    pub(super) fn ecs_draw_distance(world: &FlintWorld, entity_id: EntityId) -> Option<f32> {
+        let read = |id: EntityId| world.view(id, "lod").opt_f32("draw_distance");
+        read(entity_id)
+            .or_else(|| world.get_parent(entity_id).and_then(read))
+            .filter(|d| *d > 0.0)
+    }
+
+    /// A model draw's level of detail: the mesh's band (its reference box,
+    /// or else its own bounds, in world space) with the entity's draw
+    /// distance folded in. `None` when neither limits it.
+    pub(super) fn draw_lod(
+        gpu_mesh: &crate::gpu_mesh::GpuMesh,
+        entity_draw_distance: Option<f32>,
+        model_matrix: &[[f32; 4]; 4],
+        world_aabb: Option<([f32; 3], [f32; 3])>,
+    ) -> Option<super::DrawLod> {
+        if gpu_mesh.lod.is_none() && entity_draw_distance.is_none() {
+            return None;
+        }
+        let mut band = gpu_mesh.lod.unwrap_or_default();
+        if let Some(d) = entity_draw_distance {
+            band.draw_distance = band.draw_distance.min(d);
+        }
+        let (ref_min, ref_max) = match band.ref_box {
+            Some((lo, hi)) => transform_aabb(model_matrix, lo, hi),
+            None => world_aabb?,
+        };
+        Some(super::DrawLod {
+            band,
+            ref_min,
+            ref_max,
+        })
+    }
+
+    /// A number in the `material` component of `entity_id`, or else of its
+    /// parent.
+    fn ecs_material_f32(world: &FlintWorld, entity_id: EntityId, key: &str) -> Option<f32> {
+        let read = |id: EntityId| world.view(id, comp::MATERIAL).opt_f32(key);
+        read(entity_id).or_else(|| world.get_parent(entity_id).and_then(read))
+    }
+
+    /// ECS `material_overrides.<name>` for one glTF material, looked up on the
+    /// entity and then every ancestor (a GLB expanded into a node hierarchy
+    /// keeps its meshes several levels below the entity a scene author sees).
+    ///
+    /// A value is either a base colour, `[r, g, b]` or `[r, g, b, a]`, or a
+    /// table `{ base_color, emissive, emissive_strength }` with any of the
+    /// three (#624). Each field is the nearest ancestor's that sets it, so a
+    /// model's root can paint a material and a child light it. A missing
+    /// alpha keeps `gltf_alpha`, so a three-component colour on a blended
+    /// glass material stays translucent.
+    fn ecs_material_override(
+        world: &FlintWorld,
+        entity_id: EntityId,
+        material_name: &str,
+        gltf_alpha: f32,
+    ) -> MaterialOverride {
+        let mut found = MaterialOverride::default();
+        if material_name.is_empty() {
+            return found;
+        }
+        let mut cur = Some(entity_id);
+        let mut depth = 0;
+        while let Some(id) = cur {
+            if depth > 32 || found.is_full() {
+                break;
+            }
+            if let Some(v) = world
+                .get_components(id)
+                .and_then(|c| c.get(comp::MATERIAL_OVERRIDES))
+                .and_then(|m| m.get(material_name))
+            {
+                found.fill_from(v, gltf_alpha);
+            }
+            cur = world.get_parent(id);
+            depth += 1;
+        }
+        found
+    }
+
+    /// Extract a skinned (skeletal) entity into draw calls.
+    /// Returns `true` if skinned meshes were found (caller should `continue`).
+    pub(super) fn extract_skinned_entity(
+        &mut self,
+        device: &wgpu::Device,
+        tex_cache: &TextureCache,
+        world: &FlintWorld,
+        entity_id: flint_core::EntityId,
+        asset_name: &str,
+        model_matrix: [[f32; 4]; 4],
+        need_overlay: bool,
+    ) -> bool {
+        let skinned_meshes = match self.mesh_cache.get_skinned(asset_name) {
+            Some(meshes) => meshes,
+            None => return false,
+        };
+
+        let inv_transpose = mat4_inv_transpose(&model_matrix);
+        let first_echo_draw = self.draws.layer(Layer::Echo).len();
+        // All of an entity's echoes read the transform of its first part, as
+        // every part's holds the same matrices.
+        let mut echo_transform: Option<Arc<wgpu::BindGroup>> = None;
+        // Debug views are for the geometry itself, and return an alpha of 1.
+        let echoes = match self.debug_state.mode {
+            crate::debug::DebugMode::Pbr => self.skinning.echoes.get(&entity_id),
+            _ => None,
+        };
+        let echoes_lighten = self.skinning.echo_lighten.contains(&entity_id);
+        // A soft silhouette (#582). Debug views are of the geometry, opaque.
+        let part_softness = match self.debug_state.mode {
+            crate::debug::DebugMode::Pbr => self.skinning.part_softness.get(&entity_id),
+            _ => None,
+        };
+
+        for (mesh_index, gpu_mesh) in skinned_meshes.iter().enumerate() {
+            let transform_uniforms = TransformUniforms {
+                view_proj: [[0.0; 4]; 4],
+                model: model_matrix,
+                model_inv_transpose: inv_transpose,
+                camera_pos: [0.0; 3],
+                _pad: 0.0,
+            };
+
+            let (bc_view, _, has_bc) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.base_color_texture.as_deref(),
+                &tex_cache.default_white,
+            );
+            let (nm_view, _, has_nm) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.normal_texture.as_deref(),
+                &tex_cache.default_normal,
+            );
+            let (mr_view, _, has_mr) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.metallic_roughness_texture.as_deref(),
+                &tex_cache.default_metallic_roughness,
+            );
+            let (em_view, _, has_em) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.emissive_texture.as_deref(),
+                &tex_cache.default_white,
+            );
+
+            // Material color override (entity, then parent) — same contract as
+            // the static model path, so a scene can tint a skinned figure via
+            // `material.base_color_r/g/b` too.
+            let material_override = Self::ecs_material_override(
+                world,
+                entity_id,
+                &gpu_mesh.material.name,
+                gpu_mesh.material.base_color[3],
+            );
+            let base_color = material_override
+                .base_color
+                .or_else(|| Self::ecs_base_color_override(world, entity_id))
+                .unwrap_or(gpu_mesh.material.base_color);
+
+            let mut material_uniforms = MaterialUniforms::from_pbr(
+                base_color,
+                gpu_mesh.material.metallic,
+                gpu_mesh.material.roughness,
+            );
+            material_uniforms.has_base_color_tex = if has_bc { 1 } else { 0 };
+            material_uniforms.has_normal_map = if has_nm { 1 } else { 0 };
+            material_uniforms.has_metallic_roughness_tex = if has_mr { 1 } else { 0 };
+            if gpu_mesh.material.use_vertex_color {
+                material_uniforms.use_vertex_color = 1;
+            }
+            material_uniforms.set_emission_overridden(
+                &gpu_mesh.material,
+                material_override.emissive,
+                material_override.emissive_strength,
+            );
+            material_uniforms.set_double_sided(&gpu_mesh.material);
+            material_uniforms.scale_emission(Self::ecs_emissive_scale(world, entity_id));
+            Self::apply_unlit(world, entity_id, &mut material_uniforms);
+            material_uniforms.glow_surface = Self::ecs_glow_surface(world, entity_id);
+            material_uniforms.vertex_tint = Self::ecs_vertex_tint(world, entity_id);
+            if let Some(tint) = self
+                .skinning
+                .part_tints
+                .get(&entity_id)
+                .and_then(|tints| tints.get(mesh_index))
+            {
+                for (out, by) in material_uniforms.vertex_tint.iter_mut().zip(tint) {
+                    *out *= by;
+                }
+            }
+            material_uniforms.has_emissive_tex = if has_em { 1 } else { 0 };
+            if let Some(softness) = part_softness
+                .and_then(|parts| parts.get(mesh_index))
+                .filter(|softness| **softness > 0.0)
+            {
+                material_uniforms.set_edge_softness(*softness);
+            }
+
+            // Cached like a static model's binds (`cached_binds`), keyed
+            // the same way: uniforms plus texture identity.
+            let material_key = hash_parts(&[
+                bytemuck::bytes_of(&material_uniforms),
+                gpu_mesh
+                    .material
+                    .base_color_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+                gpu_mesh
+                    .material
+                    .normal_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+                gpu_mesh
+                    .material
+                    .metallic_roughness_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+                gpu_mesh
+                    .material
+                    .emissive_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+            ]);
+            let key = (entity_id, SKINNED_DRAW_KEY | mesh_index as u32);
+            let binds = Self::cached_binds(
+                &mut self.draw_bind_cache,
+                self.extract_frame,
+                device,
+                &self.layouts,
+                key,
+                &transform_uniforms,
+                &material_uniforms,
+                material_key,
+                bc_view,
+                nm_view,
+                mr_view,
+                em_view,
+            );
+            let transform = binds.transform.clone();
+            let transform_bind_group = binds.transform_bind_group.clone();
+            let material_buffer = binds.material_buffer.clone();
+            let material_bind_group = binds.material_bind_group.clone();
+
+            // One draw per echo per part, in the part's own colours (tint and
+            // all) at the echo's opacity. No more buffers than the opacities
+            // and colours in use: a material is shared by its content.
+            for (echo, copy) in echoes.into_iter().flatten().enumerate() {
+                if copy.opacity <= 0.0 {
+                    continue;
+                }
+                let mut uniforms = material_uniforms;
+                uniforms.opacity = copy.opacity;
+                let echo_key =
+                    hash_parts(&[&material_key.to_le_bytes(), &copy.opacity.to_le_bytes()]);
+                let (buffer, bind_group) = Self::shared_material(
+                    &mut self.draw_bind_cache,
+                    self.extract_frame,
+                    device,
+                    &self.layouts,
+                    &uniforms,
+                    echo_key,
+                    bc_view,
+                    nm_view,
+                    mr_view,
+                    em_view,
+                );
+                let blend = if echoes_lighten {
+                    Blend::Lighten
+                } else {
+                    Blend::Alpha
+                };
+                let draw = EchoDrawCall {
+                    vertex_buffer: gpu_mesh.vertex_buffer.clone(),
+                    index_buffer: gpu_mesh.index_buffer.clone(),
+                    index_count: gpu_mesh.index_count,
+                    transform_bind_group: echo_transform
+                        .get_or_insert_with(|| transform_bind_group.clone())
+                        .clone(),
+                    material_buffer: buffer,
+                    material_bind_group: bind_group,
+                    bone_bind_group: copy.bind_group.clone(),
+                    origin: [model_matrix[3][0], model_matrix[3][1], model_matrix[3][2]],
+                    echo,
+                    sort_depth: 0.0,
+                };
+                // An echo casts nothing: the shadow is the prop's own
+                self.draws.push(DrawItem::new(
+                    Some(entity_id),
+                    blend,
+                    false,
+                    Draw::Echo(draw),
+                ));
+            }
+
+            let entity_bones = self.skinning.bone_buffers.get(&entity_id);
+            let from_entity = entity_bones.is_some();
+            let bone_layout = &self
+                .pipelines
+                .skinned
+                .as_ref()
+                .unwrap()
+                .bone_bind_group_layout;
+            let stale = self
+                .skinning
+                .bone_binds
+                .get(&key)
+                .is_none_or(|b| b.from_entity != from_entity);
+            if stale {
+                let bind_group = Self::create_bone_bind(
+                    device,
+                    bone_layout,
+                    entity_bones.unwrap_or(&gpu_mesh.bone_buffer),
+                );
+                self.skinning.bone_binds.insert(
+                    key,
+                    CachedBoneBind {
+                        from_entity,
+                        bind_group: Arc::new(bind_group),
+                        touched: 0,
+                    },
+                );
+            }
+            let bone = self.skinning.bone_binds.get_mut(&key).unwrap();
+            bone.touched = self.extract_frame;
+            let bone_bind_group = bone.bind_group.clone();
+
+            // Most draws' shadows follow the bones they're drawn with.
+            let shadow_bone_bind_group = match self.skinning.shadow_bone_buffers.get(&entity_id) {
+                None => bone_bind_group.clone(),
+                Some(bones) => {
+                    let shadow_key = (entity_id, key.1 | SHADOW_BONE_KEY);
+                    let shadow = self
+                        .skinning
+                        .bone_binds
+                        .entry(shadow_key)
+                        .or_insert_with(|| {
+                            let layout = &self
+                                .pipelines
+                                .skinned
+                                .as_ref()
+                                .unwrap()
+                                .bone_bind_group_layout;
+                            CachedBoneBind {
+                                from_entity: true,
+                                bind_group: Arc::new(Self::create_bone_bind(device, layout, bones)),
+                                touched: 0,
+                            }
+                        });
+                    shadow.touched = self.extract_frame;
+                    shadow.bind_group.clone()
+                }
+            };
+
+            // Check transparency from glTF material and ECS material component
+            let gltf_alpha = gpu_mesh.material.base_color[3];
+            let ecs_material = world.view(entity_id, comp::MATERIAL);
+            let ecs_opacity = ecs_material.f32("opacity", 1.0);
+            let blend_mode =
+                parse_blend_mode(ecs_material.choice("blend_mode", BLEND_MODES, "alpha"));
+            material_uniforms.opacity = ecs_opacity;
+            material_uniforms.texture_scale = ecs_material.f32("texture_scale", 1.0);
+
+            let see_through = ecs_opacity < 1.0
+                || gltf_alpha < 1.0
+                || base_color[3] < 1.0
+                || blend_mode != BlendMode::Alpha
+                || gpu_mesh.material.alpha_mode == flint_import::AlphaMode::Blend;
+            // A soft edge (#582) draws translucent too, but stops the light whole.
+            let soft_edge_only = !see_through && material_uniforms.edge_softness() > 0.0;
+            let is_transparent = see_through || soft_edge_only;
+
+            // Wireframe edges for debug modes: unique edges of the triangle
+            // list, indexed into the same skinned vertex buffer so the lines
+            // are posed by the bone matrices exactly like the surface.
+            let (wire_index_buffer, wire_index_count) = if need_overlay {
+                let wire_indices = triangles_to_wireframe_indices(&gpu_mesh.triangle_indices());
+                if wire_indices.is_empty() {
+                    (None, 0)
+                } else {
+                    let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Skinned Wireframe Index Buffer"),
+                        contents: bytemuck::cast_slice(&wire_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+                    (Some(buf), wire_indices.len() as u32)
+                }
+            } else {
+                (None, 0)
+            };
+
+            let skinned_draw = SkinnedDrawCall {
+                vertex_buffer: gpu_mesh.vertex_buffer.clone(),
+                index_buffer: gpu_mesh.index_buffer.clone(),
+                index_count: gpu_mesh.index_count,
+                transform,
+                transform_bind_group,
+                material_buffer,
+                material_bind_group,
+                bone_bind_group,
+                shadow_bone_bind_group,
+                wire_index_buffer,
+                wire_index_count,
+                model: model_matrix,
+                model_inv_transpose: inv_transpose,
+                sort_depth: 0.0,
+                world_aabb: {
+                    let bones = self
+                        .skinning
+                        .bone_matrices
+                        .get(&entity_id)
+                        .or_else(|| self.skinning.asset_bone_matrices.get(asset_name))
+                        .map_or(&[][..], Vec::as_slice);
+                    let (lo, hi) = super::posed_aabb(bones, gpu_mesh.aabb_min, gpu_mesh.aabb_max);
+                    Some(transform_aabb(&model_matrix, lo, hi))
+                },
+                double_sided: gpu_mesh.material.double_sided,
+                soft_edge_only,
+            };
+            self.draws.push(DrawItem::new(
+                Some(entity_id),
+                Blend::of_mesh(is_transparent, blend_mode),
+                Self::ecs_casts_shadow(world, entity_id),
+                Draw::Skinned(skinned_draw),
+            ));
+        }
+
+        // They came a part at a time: a whole echo at a time, in its order,
+        // is what keeps overlapping copies from flickering.
+        self.draws.layer_mut(Layer::Echo)[first_echo_draw..].sort_by_key(echo_order);
+
+        true
+    }
+
+    /// Extract a standard (non-skinned) model entity into draw calls.
+    /// Returns `true` if meshes were found (caller should `continue`).
+    pub(super) fn extract_model_entity(
+        &mut self,
+        device: &wgpu::Device,
+        tex_cache: &TextureCache,
+        world: &FlintWorld,
+        entity_id: flint_core::EntityId,
+        asset_name: &str,
+        model_matrix: [[f32; 4]; 4],
+        need_overlay: bool,
+        need_normals: bool,
+        arrow_length: f32,
+    ) -> bool {
+        let gpu_meshes = match self.mesh_cache.get(asset_name) {
+            Some(meshes) => meshes,
+            None => return false,
+        };
+
+        let inv_transpose = mat4_inv_transpose(&model_matrix);
+        let entity_draw_distance = Self::ecs_draw_distance(world, entity_id);
+
+        for (mesh_index, gpu_mesh) in gpu_meshes.iter().enumerate() {
+            let transform_uniforms = TransformUniforms {
+                view_proj: [[0.0; 4]; 4],
+                model: model_matrix,
+                model_inv_transpose: inv_transpose,
+                camera_pos: [0.0; 3],
+                _pad: 0.0,
+            };
+
+            // Resolve textures for this material
+            let (bc_view, _, has_bc) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.base_color_texture.as_deref(),
+                &tex_cache.default_white,
+            );
+            let (nm_view, _, has_nm) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.normal_texture.as_deref(),
+                &tex_cache.default_normal,
+            );
+            let (mr_view, _, has_mr) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.metallic_roughness_texture.as_deref(),
+                &tex_cache.default_metallic_roughness,
+            );
+            let (em_view, _, has_em) = Self::resolve_texture(
+                tex_cache,
+                gpu_mesh.material.emissive_texture.as_deref(),
+                &tex_cache.default_white,
+            );
+
+            // Material colour: a per-material-name override on any ancestor wins
+            // (`material_overrides`), then the entity/parent `material.base_color_*`
+            // tint, then the glTF material itself.
+            let material_override = Self::ecs_material_override(
+                world,
+                entity_id,
+                &gpu_mesh.material.name,
+                gpu_mesh.material.base_color[3],
+            );
+            let base_color = material_override
+                .base_color
+                .or_else(|| Self::ecs_base_color_override(world, entity_id))
+                .unwrap_or(gpu_mesh.material.base_color);
+
+            let mut material_uniforms = MaterialUniforms::from_pbr(
+                base_color,
+                gpu_mesh.material.metallic,
+                gpu_mesh.material.roughness,
+            );
+            material_uniforms.has_base_color_tex = if has_bc { 1 } else { 0 };
+            material_uniforms.has_normal_map = if has_nm { 1 } else { 0 };
+            material_uniforms.has_metallic_roughness_tex = if has_mr { 1 } else { 0 };
+            if gpu_mesh.material.use_vertex_color {
+                material_uniforms.use_vertex_color = 1;
+            }
+            material_uniforms.set_emission_overridden(
+                &gpu_mesh.material,
+                material_override.emissive,
+                material_override.emissive_strength,
+            );
+            material_uniforms.set_double_sided(&gpu_mesh.material);
+            material_uniforms.scale_emission(Self::ecs_emissive_scale(world, entity_id));
+            Self::apply_unlit(world, entity_id, &mut material_uniforms);
+            material_uniforms.glow_surface = Self::ecs_glow_surface(world, entity_id);
+            material_uniforms.vertex_tint = Self::ecs_vertex_tint(world, entity_id);
+            material_uniforms.has_emissive_tex = if has_em { 1 } else { 0 };
+
+            // Read opacity and blend_mode from ECS material component
+            let ecs_material = world.view(entity_id, comp::MATERIAL);
+            let ecs_opacity = ecs_material.f32("opacity", 1.0);
+            let blend_mode =
+                parse_blend_mode(ecs_material.choice("blend_mode", BLEND_MODES, "alpha"));
+            material_uniforms.opacity = ecs_opacity;
+            material_uniforms.texture_scale = ecs_material.f32("texture_scale", 1.0);
+
+            let gltf_alpha = gpu_mesh.material.base_color[3];
+            let is_transparent = ecs_opacity < 1.0
+                || gltf_alpha < 1.0
+                || base_color[3] < 1.0
+                || blend_mode != BlendMode::Alpha
+                || gpu_mesh.material.alpha_mode == flint_import::AlphaMode::Blend;
+
+            // Texture identity rides in the key: a map that finishes loading
+            // later flips its `has_*` flag and rebuilds the material binds.
+            let material_key = hash_parts(&[
+                bytemuck::bytes_of(&material_uniforms),
+                gpu_mesh
+                    .material
+                    .base_color_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+                gpu_mesh
+                    .material
+                    .normal_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+                gpu_mesh
+                    .material
+                    .metallic_roughness_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+                gpu_mesh
+                    .material
+                    .emissive_texture
+                    .as_deref()
+                    .unwrap_or("")
+                    .as_bytes(),
+            ]);
+            let binds = Self::cached_binds(
+                &mut self.draw_bind_cache,
+                self.extract_frame,
+                device,
+                &self.layouts,
+                (entity_id, mesh_index as u32),
+                &transform_uniforms,
+                &material_uniforms,
+                material_key,
+                bc_view,
+                nm_view,
+                mr_view,
+                em_view,
+            );
+            let mut draw = Self::draw_from_cache(
+                &gpu_mesh.vertex_buffer,
+                &gpu_mesh.index_buffer,
+                gpu_mesh.index_count,
+                false,
+                binds,
+                model_matrix,
+                inv_transpose,
+            );
+            let casts_shadow = Self::ecs_casts_shadow(world, entity_id);
+            draw.double_sided = gpu_mesh.material.double_sided;
+            draw.world_aabb = Some(transform_aabb(
+                &model_matrix,
+                gpu_mesh.aabb_min,
+                gpu_mesh.aabb_max,
+            ));
+            draw.lod = Self::draw_lod(
+                gpu_mesh,
+                entity_draw_distance,
+                &model_matrix,
+                draw.world_aabb,
+            );
+
+            self.draws.push(DrawItem::new(
+                Some(entity_id),
+                Blend::of_mesh(is_transparent, blend_mode),
+                casts_shadow,
+                Draw::Static(draw),
+            ));
+
+            // Generate wireframe overlay for imported meshes
+            if need_overlay {
+                let tri_indices = gpu_mesh.triangle_indices();
+                let wire_indices = triangles_to_wireframe_indices(&tri_indices);
+                if !wire_indices.is_empty() {
+                    let vertices = gpu_mesh.vertices();
+                    let black_verts: Vec<_> = vertices
+                        .iter()
+                        .map(|v| crate::primitives::Vertex {
+                            color: [0.0, 0.0, 0.0, 1.0],
+                            ..*v
+                        })
+                        .collect();
+                    let wire_mesh = Mesh {
+                        vertices: black_verts,
+                        indices: wire_indices,
+                    };
+                    let wire_transform = TransformUniforms {
+                        view_proj: [[0.0; 4]; 4],
+                        model: model_matrix,
+                        model_inv_transpose: inv_transpose,
+                        camera_pos: [0.0; 3],
+                        _pad: 0.0,
+                    };
+                    let overlay = Self::create_draw_call(
+                        device,
+                        &self.layouts,
+                        &wire_mesh,
+                        true,
+                        wire_transform,
+                        MaterialUniforms::procedural(),
+                        tex_cache,
+                    );
+                    self.wireframe_overlay_draws.push(overlay);
+                }
+            }
+
+            // Generate normal arrows for imported meshes
+            if need_normals {
+                let tri_indices = gpu_mesh.triangle_indices();
+                let vertices = gpu_mesh.vertices();
+                let arrows = generate_normal_arrows(&vertices, &tri_indices, arrow_length);
+                if !arrows.indices.is_empty() {
+                    let arrow_transform = TransformUniforms {
+                        view_proj: [[0.0; 4]; 4],
+                        model: model_matrix,
+                        model_inv_transpose: inv_transpose,
+                        camera_pos: [0.0; 3],
+                        _pad: 0.0,
+                    };
+                    let arrow_draw = Self::create_draw_call(
+                        device,
+                        &self.layouts,
+                        &arrows,
+                        true,
+                        arrow_transform,
+                        MaterialUniforms::procedural(),
+                        tex_cache,
+                    );
+                    self.normal_arrow_draws.push(arrow_draw);
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Extract a sprite entity (sprite2d or billboard) into draw calls.
+    pub(super) fn extract_sprite_entity(
+        &mut self,
+        device: &wgpu::Device,
+        tex_cache: &TextureCache,
+        world: &FlintWorld,
+        entity_id: flint_core::EntityId,
+        sprite: &ComponentView<'_>,
+        world_pos: [f32; 3],
+        sprite2d_collected: &mut Vec<(String, i32, Sprite2dInstanceGpu)>,
+    ) {
+        // Every field through the typed view (ADR 0115): a wrong type or an
+        // unknown mode reads as the default and is reported once
+        let visible = sprite.bool("visible", true);
+        let mode = sprite.choice("mode", SPRITE_MODES, "billboard");
+
+        if visible && mode == "sprite2d" {
+            // ── Sprite2D path: collect for batched instanced rendering ──
+            self.extract_sprite2d(
+                tex_cache,
+                world,
+                entity_id,
+                sprite,
+                world_pos,
+                sprite2d_collected,
+            );
+        } else if visible {
+            // ── Billboard path: existing per-entity rendering ──
+            self.extract_billboard(device, tex_cache, entity_id, sprite, world_pos);
+        }
+    }
+
+    /// Sprite2D extraction — collect instances for batched rendering.
+    fn extract_sprite2d(
+        &mut self,
+        tex_cache: &TextureCache,
+        world: &FlintWorld,
+        entity_id: flint_core::EntityId,
+        sprite: &ComponentView<'_>,
+        world_pos: [f32; 3],
+        sprite2d_collected: &mut Vec<(String, i32, Sprite2dInstanceGpu)>,
+    ) {
+        let tex_name = sprite.str("texture", "");
+        let width = sprite.f32("width", 1.0);
+        let height = sprite.f32("height", 1.0);
+        let anchor_y = sprite.f32("anchor_y", 0.0);
+        let layer = sprite.i64("layer", 0) as i32;
+        let flip_x = sprite.bool("flip_x", false);
+        let flip_y = sprite.bool("flip_y", false);
+        let tint = sprite.vec4("tint", [1.0, 1.0, 1.0, 1.0]);
+        // [x, y, w, h] in pixels
+        let source_rect = sprite.vec4("source_rect", [0.0, 0.0, 0.0, 0.0]);
+
+        // Convert source_rect to UV coordinates
+        let uv_rect = if source_rect[2] > 0.0 && source_rect[3] > 0.0 {
+            // Get texture dimensions for pixel → UV conversion
+            let (tw, th) = tex_cache.get_dimensions(tex_name).unwrap_or((1, 1));
+            let tw = tw as f32;
+            let th = th as f32;
+            [
+                source_rect[0] / tw,
+                source_rect[1] / th,
+                (source_rect[0] + source_rect[2]) / tw,
+                (source_rect[1] + source_rect[3]) / th,
+            ]
+        } else {
+            // Full texture
+            [0.0, 0.0, 1.0, 1.0]
+        };
+
+        // ── Screen anchor vs parallax position ──
+        let sa = world.view(entity_id, comp::SCREEN_ANCHOR);
+        let parallax = world.view(entity_id, comp::PARALLAX);
+        let (adjusted_x, adjusted_y, skip_tiling) = if sa.exists() {
+            let anchor_name = sa.choice("anchor", SCREEN_ANCHORS, "center");
+            let off_x = sa.f32("offset_x", 0.0);
+            let off_y = sa.f32("offset_y", 0.0);
+            let half_w = self.ortho_height * self.aspect_ratio * 0.5;
+            let half_h = self.ortho_height * 0.5;
+            let (ax, ay) = anchor_origin(anchor_name, half_w, half_h);
+            (
+                self.camera_offset[0] + ax + off_x,
+                self.camera_offset[1] + ay + off_y,
+                true,
+            )
+        } else {
+            let scroll_rate = parallax.f32("scroll_rate", 1.0);
+            (
+                world_pos[0] + self.camera_offset[0] * (1.0 - scroll_rate),
+                world_pos[1] + self.camera_offset[1] * (1.0 - scroll_rate),
+                false,
+            )
+        };
+
+        // ── ui_fill clipping ──
+        let (uv_rect, width, height, fill_x_off, fill_y_off) =
+            if let Some(fill) = Some(world.view(entity_id, comp::UI_FILL)).filter(|f| f.exists()) {
+                let value = fill.f32("value", 1.0);
+                // An unknown direction has always clipped nothing; a value
+                // that is no string fills left to right
+                let direction = match fill.raw("direction") {
+                    Some(v) if v.is_str() => {
+                        fill.opt_choice("direction", FILL_DIRECTIONS).unwrap_or("")
+                    }
+                    _ => fill.choice("direction", FILL_DIRECTIONS, "left_to_right"),
+                };
+                apply_fill(uv_rect, width, height, value, direction)
+            } else {
+                (uv_rect, width, height, 0.0, 0.0)
+            };
+
+        let final_x = adjusted_x + fill_x_off;
+        let final_y = adjusted_y + fill_y_off;
+
+        // ── Parallax tiling (skipped for screen-anchored sprites) ──
+        if !skip_tiling {
+            let repeat_x = parallax.bool("repeat_x", false);
+            let repeat_y = parallax.bool("repeat_y", false);
+
+            if repeat_x || repeat_y {
+                let viewport_h = self.ortho_height;
+                let viewport_w = viewport_h * self.aspect_ratio;
+                let cam_x = self.camera_offset[0];
+                let cam_y = self.camera_offset[1];
+
+                let (start_tx, end_tx) = if repeat_x && width > 0.0 {
+                    let left = cam_x - viewport_w * 0.5;
+                    let right = cam_x + viewport_w * 0.5;
+                    let start = ((left - final_x) / width).floor() as i32 - 1;
+                    let end = ((right - final_x) / width).ceil() as i32 + 1;
+                    (start, end)
+                } else {
+                    (0, 1)
+                };
+                let (start_ty, end_ty) = if repeat_y && height > 0.0 {
+                    let bottom = cam_y - viewport_h * 0.5;
+                    let top = cam_y + viewport_h * 0.5;
+                    let start = ((bottom - final_y) / height).floor() as i32 - 1;
+                    let end = ((top - final_y) / height).ceil() as i32 + 1;
+                    (start, end)
+                } else {
+                    (0, 1)
+                };
+
+                for ty in start_ty..end_ty {
+                    for tx in start_tx..end_tx {
+                        let tile_x = final_x + tx as f32 * width;
+                        let tile_y = final_y + ty as f32 * height;
+                        let instance = Sprite2dInstanceGpu {
+                            pos_layer: [tile_x, tile_y, 0.5, layer as f32 * 0.01],
+                            size: [width, height, anchor_y, 0.0],
+                            uv_rect,
+                            tint,
+                            flags: [
+                                if flip_x { 1.0 } else { 0.0 },
+                                if flip_y { 1.0 } else { 0.0 },
+                                0.0,
+                                0.0,
+                            ],
+                        };
+                        sprite2d_collected.push((tex_name.to_string(), layer, instance));
+                    }
+                }
+                return; // tiled sprites already emitted
+            }
+        }
+
+        // Single sprite instance
+        let instance = Sprite2dInstanceGpu {
+            pos_layer: [final_x, final_y, 0.5, layer as f32 * 0.01],
+            size: [width, height, anchor_y, 0.0],
+            uv_rect,
+            tint,
+            flags: [
+                if flip_x { 1.0 } else { 0.0 },
+                if flip_y { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
+        };
+        sprite2d_collected.push((tex_name.to_string(), layer, instance));
+
+        // ── ui_text: expand text to glyph sprite instances ──
+        let ui_text = world.view(entity_id, comp::UI_TEXT);
+        if ui_text.exists() {
+            let font_path_str = ui_text.str("font", "");
+            let text = ui_text.str("text", "");
+            let text_size = ui_text.f32("size", 1.0);
+            let text_color = ui_text.vec4("color", [1.0, 1.0, 1.0, 1.0]);
+            let align = ui_text.choice("align", TEXT_ALIGNS, "left");
+
+            if !font_path_str.is_empty() && !text.is_empty() {
+                // Fonts load and upload with the scene's textures
+                // (`SceneRenderer::load_ui_font`); one that didn't draws nothing.
+                if let Some(font) = self.ui_font(tex_cache, font_path_str) {
+                    let glyphs = font
+                        .layout_text(text, final_x, final_y, text_size, text_color, layer, align);
+                    sprite2d_collected.extend(glyphs);
+                }
+            }
+        }
+    }
+
+    /// Billboard sprite extraction — create per-entity draw call.
+    fn extract_billboard(
+        &mut self,
+        device: &wgpu::Device,
+        tex_cache: &TextureCache,
+        entity_id: flint_core::EntityId,
+        sprite: &ComponentView<'_>,
+        world_pos: [f32; 3],
+    ) {
+        let bp = match &self.pipelines.billboard {
+            Some(bp) => bp,
+            None => return,
+        };
+
+        let tex_name = sprite.str("texture", "");
+        let width = sprite.f32("width", 1.0);
+        let height = sprite.f32("height", 1.0);
+        let frame = sprite.i64("frame", 0) as u32;
+        let frames_x = sprite.i64("frames_x", 1) as u32;
+        let frames_y = sprite.i64("frames_y", 1) as u32;
+        let anchor_y = sprite.f32("anchor_y", 0.0);
+        let fullbright = sprite.bool("fullbright", true);
+
+        let sprite_instance = SpriteInstance {
+            world_pos,
+            width,
+            height,
+            frame,
+            frames_x,
+            frames_y,
+            anchor_y,
+            fullbright: if fullbright { 1 } else { 0 },
+            selection_highlight: 0,
+            _pad1: 0.0,
+        };
+
+        // Billboard uniforms will be filled during render (need camera)
+        let billboard_uniforms = BillboardUniforms {
+            view_proj: [[0.0; 4]; 4],
+            camera_right: [1.0, 0.0, 0.0],
+            _pad0: 0.0,
+            camera_up: [0.0, 1.0, 0.0],
+            _pad1: 0.0,
+        };
+
+        let billboard_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Billboard Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[billboard_uniforms]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let sprite_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Sprite Instance Buffer"),
+            contents: bytemuck::cast_slice(&[sprite_instance]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let billboard_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bp.billboard_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: billboard_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: sprite_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("Billboard Bind Group"),
+        });
+
+        // Resolve sprite texture
+        let (tex_view, tex_sampler, _has_tex) = Self::resolve_texture(
+            tex_cache,
+            if tex_name.is_empty() {
+                None
+            } else {
+                Some(tex_name)
+            },
+            &tex_cache.default_white,
+        );
+
+        let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &bp.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(tex_sampler),
+                },
+            ],
+            label: Some("Billboard Texture Bind Group"),
+        });
+
+        // Opaque: its alpha only cuts it out, and it writes depth
+        self.draws.push(DrawItem::new(
+            Some(entity_id),
+            Blend::Opaque,
+            false,
+            Draw::Billboard(BillboardDrawCall {
+                billboard_buffer,
+                sprite_buffer,
+                billboard_bind_group,
+                texture_bind_group,
+            }),
+        ));
+    }
+
+    /// Extract a standalone `ui_text` entity (without a sprite component).
+    /// Returns `true` if the entity was processed (caller should `continue`).
+    pub(super) fn extract_ui_text_entity(
+        &mut self,
+        tex_cache: &TextureCache,
+        world: &FlintWorld,
+        entity_id: flint_core::EntityId,
+        world_pos: [f32; 3],
+        sprite2d_collected: &mut Vec<(String, i32, Sprite2dInstanceGpu)>,
+    ) -> bool {
+        if world.get_component(entity_id, comp::SPRITE).is_some() {
+            return false;
+        }
+
+        // Through the typed view (ADR 0115): a wrong type or an unknown
+        // `align` reads as the default and is reported once
+        let ui_text = world.view(entity_id, comp::UI_TEXT);
+        if !ui_text.exists() {
+            return false;
+        }
+
+        let font_path_str = ui_text.str("font", "");
+        let text = ui_text.str("text", "");
+
+        if font_path_str.is_empty() || text.is_empty() {
+            return false;
+        }
+
+        let text_size = ui_text.f32("size", 1.0);
+        let text_color = ui_text.vec4("color", [1.0, 1.0, 1.0, 1.0]);
+        let align = ui_text.choice("align", TEXT_ALIGNS, "left");
+        let layer = ui_text.i64("layer", 0) as i32;
+
+        // Compute position from screen_anchor or world pos
+        let sa = world.view(entity_id, comp::SCREEN_ANCHOR);
+        let (text_x, text_y) = if sa.exists() {
+            let anchor_name = sa.choice("anchor", SCREEN_ANCHORS, "center");
+            let off_x = sa.f32("offset_x", 0.0);
+            let off_y = sa.f32("offset_y", 0.0);
+            let half_w = self.ortho_height * self.aspect_ratio * 0.5;
+            let half_h = self.ortho_height * 0.5;
+            let (ax, ay) = anchor_origin(anchor_name, half_w, half_h);
+            (
+                self.camera_offset[0] + ax + off_x,
+                self.camera_offset[1] + ay + off_y,
+            )
+        } else {
+            (world_pos[0], world_pos[1])
+        };
+
+        if let Some(font) = self.ui_font(tex_cache, font_path_str) {
+            let glyphs =
+                font.layout_text(text, text_x, text_y, text_size, text_color, layer, align);
+            sprite2d_collected.extend(glyphs);
+        }
+
+        true
+    }
+
+    /// Extract a bounds-only entity into procedural geometry draw calls.
+    pub(super) fn extract_bounds_entity(
+        &mut self,
+        device: &wgpu::Device,
+        tex_cache: &TextureCache,
+        world: &FlintWorld,
+        entity_id: flint_core::EntityId,
+        visual: &flint_schema::ArchetypeVisual,
+        model_matrix: [[f32; 4]; 4],
+        need_overlay: bool,
+        need_normals: bool,
+        arrow_length: f32,
+    ) {
+        // The entity's `bounds` box (the caller draws only entities that
+        // have one); a `min` or `max` that isn't three numbers is a unit box
+        // about the origin, which the archetype no longer sizes (#751)
+        let (size, bounds_center) = extract_bounds_info(&world.view(entity_id, comp::BOUNDS))
+            .unwrap_or(([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]));
+
+        // The box geometry is uploaded once per distinct size/colour/wireframe
+        // and shared; the CPU-side mesh is only built for the debug overlays.
+        let build_mesh = || {
+            if visual.wireframe {
+                create_wireframe_box_mesh(size[0], size[1], size[2], visual.color)
+            } else {
+                create_box_mesh(size[0], size[1], size[2], visual.color)
+            }
+        };
+        let mesh_key = hash_parts(&[
+            bytemuck::bytes_of(&size),
+            bytemuck::bytes_of(&visual.color),
+            &[visual.wireframe as u8],
+        ]);
+        let (box_vb, box_ib, box_index_count) = {
+            let cached =
+                Self::cached_box_mesh(&mut self.box_mesh_cache, device, mesh_key, build_mesh);
+            (
+                cached.vertex_buffer.clone(),
+                cached.index_buffer.clone(),
+                cached.index_count,
+            )
+        };
+        let mesh = if need_overlay || need_normals {
+            Some(build_mesh())
+        } else {
+            None
+        };
+
+        let mut model = model_matrix;
+        // Apply bounds_center in local space so rotation pivots around entity position
+        let rx = model[0][0] * bounds_center[0]
+            + model[1][0] * bounds_center[1]
+            + model[2][0] * bounds_center[2];
+        let ry = model[0][1] * bounds_center[0]
+            + model[1][1] * bounds_center[1]
+            + model[2][1] * bounds_center[2];
+        let rz = model[0][2] * bounds_center[0]
+            + model[1][2] * bounds_center[1]
+            + model[2][2] * bounds_center[2];
+        model[3][0] += rx;
+        model[3][1] += ry;
+        model[3][2] += rz;
+
+        let inv_transpose = mat4_inv_transpose(&model);
+        // The box's world bounds, for the style scissor only (#385): boxes
+        // aren't culled, and `world_aabb` would start culling them
+        let half = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+        let box_aabb = Some(transform_aabb(&model, [-half[0], -half[1], -half[2]], half));
+
+        let transform_uniforms = TransformUniforms {
+            view_proj: [[0.0; 4]; 4],
+            model,
+            model_inv_transpose: inv_transpose,
+            camera_pos: [0.0; 3],
+            _pad: 0.0,
+        };
+
+        // Check for material.texture to use file-based textures on procedural geometry
+        // Through the typed view (ADR 0115): a wrong type or an unknown
+        // blend mode reads as the default and is reported once
+        let material_component = world.view(entity_id, comp::MATERIAL);
+        let material_texture = material_component.opt_str("texture").map(String::from);
+
+        // Extract opacity and blend_mode for procedural geometry
+        let proc_opacity = material_component.f32("opacity", 1.0);
+        let proc_texture_scale = material_component.f32("texture_scale", 1.0);
+        let proc_blend_mode =
+            parse_blend_mode(material_component.choice("blend_mode", BLEND_MODES, "alpha"));
+        let proc_is_transparent = proc_opacity < 1.0 || proc_blend_mode != BlendMode::Alpha;
+        let casts_shadow = Self::ecs_casts_shadow(world, entity_id);
+
+        if !visual.wireframe {
+            if let Some(tex_name) = &material_texture {
+                let (bc_view, _, has_bc) = Self::resolve_texture(
+                    tex_cache,
+                    Some(tex_name.as_str()),
+                    &tex_cache.default_white,
+                );
+
+                if has_bc {
+                    let metallic = material_component.f32("metallic", 0.0);
+                    let roughness = material_component.f32("roughness", 0.7);
+
+                    // Try companion PBR maps (e.g. tavern_brick_normal, tavern_brick_roughness)
+                    let normal_name = format!("{}_normal", tex_name);
+                    let roughness_name = format!("{}_roughness", tex_name);
+                    let (nm_view, _, has_nm) = Self::resolve_texture(
+                        tex_cache,
+                        Some(normal_name.as_str()),
+                        &tex_cache.default_normal,
+                    );
+                    let (mr_view, _, has_mr) = Self::resolve_texture(
+                        tex_cache,
+                        Some(roughness_name.as_str()),
+                        &tex_cache.default_metallic_roughness,
+                    );
+
+                    let mut material_uniforms =
+                        MaterialUniforms::from_pbr([1.0, 1.0, 1.0, 1.0], metallic, roughness);
+                    material_uniforms.has_base_color_tex = 1;
+                    material_uniforms.has_normal_map = if has_nm { 1 } else { 0 };
+                    material_uniforms.has_metallic_roughness_tex = if has_mr { 1 } else { 0 };
+                    material_uniforms.opacity = proc_opacity;
+                    material_uniforms.texture_scale = proc_texture_scale;
+                    Self::apply_box_emission(world, entity_id, &mut material_uniforms);
+                    Self::apply_unlit(world, entity_id, &mut material_uniforms);
+
+                    let material_key = hash_parts(&[
+                        b"textured",
+                        bytemuck::bytes_of(&material_uniforms),
+                        tex_name.as_bytes(),
+                    ]);
+                    let binds = Self::cached_binds(
+                        &mut self.draw_bind_cache,
+                        self.extract_frame,
+                        device,
+                        &self.layouts,
+                        (entity_id, 0),
+                        &transform_uniforms,
+                        &material_uniforms,
+                        material_key,
+                        bc_view,
+                        nm_view,
+                        mr_view,
+                        &tex_cache.default_white.view,
+                    );
+                    let mut draw = Self::draw_from_cache(
+                        &box_vb,
+                        &box_ib,
+                        box_index_count,
+                        false,
+                        binds,
+                        model,
+                        inv_transpose,
+                    );
+                    draw.style_aabb = box_aabb;
+                    self.draws.push(DrawItem::new(
+                        Some(entity_id),
+                        Blend::of_mesh(proc_is_transparent, proc_blend_mode),
+                        casts_shadow,
+                        Draw::Static(draw),
+                    ));
+                } else {
+                    let mut material_uniforms = MaterialUniforms::procedural();
+                    Self::apply_box_emission(world, entity_id, &mut material_uniforms);
+                    Self::apply_unlit(world, entity_id, &mut material_uniforms);
+                    let material_key =
+                        hash_parts(&[b"procedural", bytemuck::bytes_of(&material_uniforms)]);
+                    let binds = Self::cached_binds(
+                        &mut self.draw_bind_cache,
+                        self.extract_frame,
+                        device,
+                        &self.layouts,
+                        (entity_id, 0),
+                        &transform_uniforms,
+                        &material_uniforms,
+                        material_key,
+                        &tex_cache.default_white.view,
+                        &tex_cache.default_normal.view,
+                        &tex_cache.default_metallic_roughness.view,
+                        &tex_cache.default_white.view,
+                    );
+                    let mut draw = Self::draw_from_cache(
+                        &box_vb,
+                        &box_ib,
+                        box_index_count,
+                        false,
+                        binds,
+                        model,
+                        inv_transpose,
+                    );
+                    draw.style_aabb = box_aabb;
+                    self.draws.push(DrawItem::new(
+                        Some(entity_id),
+                        Blend::Opaque,
+                        casts_shadow,
+                        Draw::Static(draw),
+                    ));
+                }
+            } else {
+                // Use material.color for PBR base color if present
+                let mat_color = material_component.opt_color("color");
+
+                let mut mat_uniforms = if let Some(color) = mat_color {
+                    let metallic = material_component.f32("metallic", 0.0);
+                    let roughness = material_component.f32("roughness", 0.7);
+                    MaterialUniforms::from_pbr(color, metallic, roughness)
+                } else {
+                    MaterialUniforms::procedural()
+                };
+                mat_uniforms.opacity = proc_opacity;
+                mat_uniforms.texture_scale = proc_texture_scale;
+                Self::apply_box_emission(world, entity_id, &mut mat_uniforms);
+                Self::apply_unlit(world, entity_id, &mut mat_uniforms);
+
+                let material_key = hash_parts(&[b"colour", bytemuck::bytes_of(&mat_uniforms)]);
+                let binds = Self::cached_binds(
+                    &mut self.draw_bind_cache,
+                    self.extract_frame,
+                    device,
+                    &self.layouts,
+                    (entity_id, 0),
+                    &transform_uniforms,
+                    &mat_uniforms,
+                    material_key,
+                    &tex_cache.default_white.view,
+                    &tex_cache.default_normal.view,
+                    &tex_cache.default_metallic_roughness.view,
+                    &tex_cache.default_white.view,
+                );
+                let mut draw = Self::draw_from_cache(
+                    &box_vb,
+                    &box_ib,
+                    box_index_count,
+                    false,
+                    binds,
+                    model,
+                    inv_transpose,
+                );
+                draw.style_aabb = box_aabb;
+                self.draws.push(DrawItem::new(
+                    Some(entity_id),
+                    Blend::of_mesh(proc_is_transparent, proc_blend_mode),
+                    casts_shadow,
+                    Draw::Static(draw),
+                ));
+            }
+        } else {
+            let material_uniforms = MaterialUniforms::procedural();
+            let material_key = hash_parts(&[b"wire", bytemuck::bytes_of(&material_uniforms)]);
+            let binds = Self::cached_binds(
+                &mut self.draw_bind_cache,
+                self.extract_frame,
+                device,
+                &self.layouts,
+                (entity_id, 0),
+                &transform_uniforms,
+                &material_uniforms,
+                material_key,
+                &tex_cache.default_white.view,
+                &tex_cache.default_normal.view,
+                &tex_cache.default_metallic_roughness.view,
+                &tex_cache.default_white.view,
+            );
+            let draw = Self::draw_from_cache(
+                &box_vb,
+                &box_ib,
+                box_index_count,
+                true,
+                binds,
+                model,
+                inv_transpose,
+            );
+            self.draws.push(DrawItem::new(
+                Some(entity_id),
+                Blend::Opaque,
+                true,
+                Draw::Static(draw),
+            ));
+        }
+
+        // Debug overlays are rebuilt every frame; they only exist in the
+        // wireframe/normals debug modes so the cost is opt-in.
+        let mesh = match mesh {
+            Some(m) => m,
+            None => return,
+        };
+
+        // Generate wireframe overlay for procedural solid shapes
+        if need_overlay && !visual.wireframe {
+            let wire_indices = triangles_to_wireframe_indices(&mesh.indices);
+            if !wire_indices.is_empty() {
+                let black_verts: Vec<_> = mesh
+                    .vertices
+                    .iter()
+                    .map(|v| crate::primitives::Vertex {
+                        color: [0.0, 0.0, 0.0, 1.0],
+                        ..*v
+                    })
+                    .collect();
+                let wire_mesh = Mesh {
+                    vertices: black_verts,
+                    indices: wire_indices,
+                };
+                let wire_transform = TransformUniforms {
+                    view_proj: [[0.0; 4]; 4],
+                    model,
+                    model_inv_transpose: inv_transpose,
+                    camera_pos: [0.0; 3],
+                    _pad: 0.0,
+                };
+                let overlay = Self::create_draw_call(
+                    device,
+                    &self.layouts,
+                    &wire_mesh,
+                    true,
+                    wire_transform,
+                    MaterialUniforms::procedural(),
+                    tex_cache,
+                );
+                self.wireframe_overlay_draws.push(overlay);
+            }
+        }
+
+        // Generate normal arrows for procedural solid shapes
+        if need_normals && !visual.wireframe {
+            let arrows = generate_normal_arrows(&mesh.vertices, &mesh.indices, arrow_length);
+            if !arrows.indices.is_empty() {
+                let arrow_transform = TransformUniforms {
+                    view_proj: [[0.0; 4]; 4],
+                    model,
+                    model_inv_transpose: inv_transpose,
+                    camera_pos: [0.0; 3],
+                    _pad: 0.0,
+                };
+                let arrow_draw = Self::create_draw_call(
+                    device,
+                    &self.layouts,
+                    &arrows,
+                    true,
+                    arrow_transform,
+                    MaterialUniforms::procedural(),
+                    tex_cache,
+                );
+                self.normal_arrow_draws.push(arrow_draw);
+            }
+        }
+    }
+
+    /// Sort collected sprite2d instances and batch them by texture for instanced rendering.
+    pub(super) fn batch_sprite2d_instances(
+        &mut self,
+        device: &wgpu::Device,
+        tex_cache: &TextureCache,
+        mut collected: Vec<(String, i32, Sprite2dInstanceGpu)>,
+    ) {
+        if collected.is_empty() {
+            return;
+        }
+
+        let sp = match &self.pipelines.sprite2d {
+            Some(sp) => sp,
+            None => return,
+        };
+
+        // Sort by (layer, texture_name) for optimal batching
+        collected.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+        // Group consecutive same-texture sprites into batches
+        let mut batch_start = 0;
+        while batch_start < collected.len() {
+            let batch_tex = &collected[batch_start].0;
+            let mut batch_end = batch_start + 1;
+            while batch_end < collected.len() && collected[batch_end].0 == *batch_tex {
+                batch_end += 1;
+            }
+
+            let instances: Vec<Sprite2dInstanceGpu> = collected[batch_start..batch_end]
+                .iter()
+                .map(|(_, _, inst)| *inst)
+                .collect();
+
+            let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Sprite2D Instance Buffer"),
+                contents: bytemuck::cast_slice(&instances),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+
+            let instance_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &sp.instance_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: instance_buffer.as_entire_binding(),
+                }],
+                label: Some("Sprite2D Instance Bind Group"),
+            });
+
+            // Resolve texture
+            let (tex_view, tex_sampler, _) = Self::resolve_texture(
+                tex_cache,
+                if batch_tex.is_empty() {
+                    None
+                } else {
+                    Some(batch_tex.as_str())
+                },
+                &tex_cache.default_white,
+            );
+
+            let texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &sp.texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(tex_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(tex_sampler),
+                    },
+                ],
+                label: Some("Sprite2D Texture Bind Group"),
+            });
+
+            self.sprite2d_batches
+                .push(crate::sprite2d_pipeline::Sprite2dBatch {
+                    instance_buffer,
+                    instance_count: instances.len() as u32,
+                    texture_bind_group,
+                    instance_bind_group,
+                });
+
+            batch_start = batch_end;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn world_with_material(text: &str) -> (FlintWorld, EntityId) {
+        let mut world = FlintWorld::new();
+        let id = world.spawn("lamp").unwrap();
+        let data: toml::Value = toml::from_str(text).unwrap();
+        world.set_component(id, comp::MATERIAL, data).unwrap();
+        (world, id)
+    }
+
+    /// #797: a bounds box's `material.emissive` is its light, times
+    /// `emissive_scale`; unset leaves the uniforms' bytes as they were, so a
+    /// box without it keeps its cached material and draws as before.
+    #[test]
+    fn a_box_gives_off_its_emissive_and_none_when_unset() {
+        let emission = |text: &str| {
+            let (world, id) = world_with_material(text);
+            let mut uniforms = MaterialUniforms::procedural();
+            SceneRenderer::apply_box_emission(&world, id, &mut uniforms);
+            assert!(world.read_reports().is_empty(), "{text}");
+            uniforms
+        };
+        assert_eq!(
+            emission("emissive = [9, 6, 2.5]").emissive,
+            [9.0, 6.0, 2.5, 0.0]
+        );
+        assert_eq!(
+            emission("emissive = [2.0, 1.0, 0.5]\nemissive_scale = 0.5").emissive,
+            [1.0, 0.5, 0.25, 0.0]
+        );
+        assert_eq!(
+            emission("emissive = [1.0, -1.0, 0.0, 1.0]").emissive,
+            [1.0, 0.0, 0.0, 0.0],
+            "a fourth number is ignored, a negative one is no light"
+        );
+        let plain = MaterialUniforms::procedural();
+        for text in ["roughness = 0.8", "emissive_scale = 3.0"] {
+            assert_eq!(
+                bytemuck::bytes_of(&emission(text)),
+                bytemuck::bytes_of(&plain),
+                "{text}"
+            );
+        }
+        // A wrong type is no light, reported once
+        let (world, id) = world_with_material("emissive = \"bright\"");
+        let mut uniforms = MaterialUniforms::procedural();
+        SceneRenderer::apply_box_emission(&world, id, &mut uniforms);
+        assert_eq!(uniforms.emissive, [0.0; 4]);
+        assert_eq!(world.read_reports().len(), 1);
+    }
+
+    /// #685: each channel was read with `as_float`, so one integer channel
+    /// (`base_color_r = 1`) dropped the whole tint, in silence.
+    #[test]
+    fn an_integer_colour_channel_keeps_the_tint() {
+        let (world, id) =
+            world_with_material("base_color_r = 1\nbase_color_g = 0.5\nbase_color_b = 0");
+        assert_eq!(
+            SceneRenderer::ecs_base_color_override(&world, id),
+            Some([1.0, 0.5, 0.0, 1.0])
+        );
+        assert!(world.read_reports().is_empty());
+
+        // A child with no material of its own takes its parent's
+        let mut world = world;
+        let child = world.spawn("lamp_shade").unwrap();
+        world.set_parent(child, id).unwrap();
+        assert_eq!(
+            SceneRenderer::ecs_base_color_override(&world, child),
+            Some([1.0, 0.5, 0.0, 1.0])
+        );
+    }
+
+    #[test]
+    fn a_channel_of_the_wrong_type_is_no_tint_and_is_reported_once() {
+        let (world, id) =
+            world_with_material("base_color_r = \"red\"\nbase_color_g = 0.5\nbase_color_b = 0.0");
+        for _ in 0..3 {
+            assert_eq!(SceneRenderer::ecs_base_color_override(&world, id), None);
+        }
+        let said = world.read_reports().snapshot();
+        assert_eq!(said.len(), 1);
+        assert_eq!(
+            said[0].one_line(),
+            "error[bad-type] entity 'lamp' material.base_color_r: expected a number, got string \
+             \"red\" (read as if it were not set)"
+        );
+
+        // No colour written at all is not a mistake
+        let (world, id) = world_with_material("roughness = 0.4");
+        assert_eq!(SceneRenderer::ecs_base_color_override(&world, id), None);
+        assert!(world.read_reports().is_empty());
+    }
+
+    /// #884: `color` on a model entity was ignored in silence, so 15 scenes'
+    /// spheres drew in the GLB's own white.
+    #[test]
+    fn a_models_color_is_its_base_colour() {
+        let (world, id) = world_with_material("color = [0.85, 0.35, 0.22]");
+        assert_eq!(
+            SceneRenderer::ecs_base_color_override(&world, id),
+            Some([0.85, 0.35, 0.22, 1.0])
+        );
+        let (world, id) = world_with_material("color = [0.2, 0.4, 0.8, 0.5]");
+        assert_eq!(
+            SceneRenderer::ecs_base_color_override(&world, id),
+            Some([0.2, 0.4, 0.8, 0.5])
+        );
+        assert!(world.read_reports().is_empty());
+    }
+
+    /// A script's `set_material_color` writes the scalars, and must still
+    /// recolour a model the scene gave a `color`.
+    #[test]
+    fn the_scalars_beat_color() {
+        let (world, id) = world_with_material(
+            "color = [0.85, 0.35, 0.22]\nbase_color_r = 0.1\nbase_color_g = 0.9\nbase_color_b = 0.1",
+        );
+        assert_eq!(
+            SceneRenderer::ecs_base_color_override(&world, id),
+            Some([0.1, 0.9, 0.1, 1.0])
+        );
+    }
+
+    /// Each reader's allowed values are its schema's `values` (#802): the
+    /// two lists are written twice, so this holds them together.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // a test reads the checkout's schema files
+    fn each_readers_choices_are_its_schemas_values() {
+        use crate::bitmap_font::{FILL_DIRECTIONS, SCREEN_ANCHORS, SPRITE_MODES, TEXT_ALIGNS};
+        let schemas = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let values = |component: &str, field: &str| -> Vec<String> {
+            let file = schemas.join(format!("components/{component}.toml"));
+            let text = std::fs::read_to_string(&file).unwrap();
+            let doc: toml::Table = toml::from_str(&text).unwrap();
+            doc["component"][component]["fields"][field]["values"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{component}.{field} lists no values"))
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        for (component, field, reader) in [
+            (comp::SPRITE, "mode", SPRITE_MODES),
+            (comp::MATERIAL, "blend_mode", BLEND_MODES),
+            (comp::SCREEN_ANCHOR, "anchor", SCREEN_ANCHORS),
+            (comp::UI_FILL, "direction", FILL_DIRECTIONS),
+            (comp::UI_TEXT, "align", TEXT_ALIGNS),
+        ] {
+            assert_eq!(
+                values(component, field),
+                reader,
+                "{component}.{field}: the schema's values and the reader's differ"
+            );
+        }
+    }
+
+    #[test]
+    fn material_flags_and_lod_report_a_wrong_type_once_and_fall_to_the_parent() {
+        let (mut world, child) = world_with_material("cast_shadows = \"no\"\nunlit = 1");
+        let parent = world.spawn("shelf").unwrap();
+        let data: toml::Value = toml::from_str("cast_shadows = false").unwrap();
+        world.set_component(parent, comp::MATERIAL, data).unwrap();
+        world.set_parent(child, parent).unwrap();
+        let lod: toml::Value = toml::from_str("draw_distance = \"far\"").unwrap();
+        world.set_component(child, "lod", lod).unwrap();
+        for _ in 0..3 {
+            // A wrong value on the child is as if unset: the parent's is used
+            assert!(!SceneRenderer::ecs_casts_shadow(&world, child));
+            assert!(!SceneRenderer::ecs_unlit(&world, child));
+            assert_eq!(SceneRenderer::ecs_draw_distance(&world, child), None);
+        }
+        let said: Vec<String> = world
+            .read_reports()
+            .snapshot()
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}.{}",
+                    d.component.as_deref().unwrap(),
+                    d.field.as_deref().unwrap()
+                )
+            })
+            .collect();
+        assert_eq!(
+            said,
+            [
+                "material.cast_shadows",
+                "material.unlit",
+                "lod.draw_distance"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_color_that_is_not_a_colour_is_no_tint_and_is_reported_once() {
+        let (world, id) = world_with_material("color = \"red\"");
+        for _ in 0..3 {
+            assert_eq!(SceneRenderer::ecs_base_color_override(&world, id), None);
+        }
+        assert_eq!(world.read_reports().snapshot().len(), 1);
+    }
+
+    /// An expanded GLB node takes its model root's `color`; a model under a
+    /// bounds-drawn parent does not take that box's colour.
+    #[test]
+    fn a_parents_color_reaches_a_child_only_from_a_model() {
+        let (mut world, root) = world_with_material("color = [0.86, 0.82, 0.74]");
+        let child = world.spawn("lamp_shade").unwrap();
+        world.set_parent(child, root).unwrap();
+        // Bounds-drawn parent: its colour is its own box's
+        assert_eq!(SceneRenderer::ecs_base_color_override(&world, child), None);
+
+        let model: toml::Value = toml::from_str("asset = \"Sphere\"").unwrap();
+        world.set_component(root, comp::MODEL, model).unwrap();
+        assert_eq!(
+            SceneRenderer::ecs_base_color_override(&world, child),
+            Some([0.86, 0.82, 0.74, 1.0])
+        );
+
+        // The child's own colour wins over the root's
+        let own: toml::Value = toml::from_str("color = [0.1, 0.2, 0.3]").unwrap();
+        world.set_component(child, comp::MATERIAL, own).unwrap();
+        assert_eq!(
+            SceneRenderer::ecs_base_color_override(&world, child),
+            Some([0.1, 0.2, 0.3, 1.0])
+        );
+    }
+}

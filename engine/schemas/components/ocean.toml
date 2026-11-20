@@ -1,0 +1,75 @@
+[component.ocean]
+description = "Endless Gerstner-wave ocean surface with stylized cel shading. One per scene; the grid follows the camera."
+
+[component.ocean.fields]
+# ── Simulation (flint_geometry::ocean::OceanParams) ─────────────────────────
+seed = { type = "i32", description = "Wave spectrum RNG seed (same seed = same ocean)", default = 7 }
+num_waves = { type = "i32", description = "Number of Gerstner waves, 1-16", default = 12 }
+wavelength_min = { type = "f32", description = "Shortest wavelength in meters", default = 4.0 }
+wavelength_max = { type = "f32", description = "Longest wavelength in meters", default = 55.0 }
+amplitude = { type = "f32", description = "Total wave amplitude in meters (max crest height)", default = 0.85 }
+choppiness = { type = "f32", description = "0 = rolling swells, 1 = sharp trochoids (pre-cusp)", default = 0.7 }
+direction_deg = { type = "f32", description = "Primary wave travel direction in degrees (0 = +Z)", default = 25.0 }
+spread_deg = { type = "f32", description = "Directional spread in degrees; small waves wander more", default = 40.0 }
+speed_scale = { type = "f32", description = "Time multiplier: 0 = frozen, 1 = physical speed", default = 1.0 }
+wind_speed = { type = "f32", description = "Wind speed m/s: shapes the JONSWAP energy peak (where the height lives)", default = 7.0 }
+fetch_km = { type = "f32", description = "Wind fetch in km: longer = energy in longer swells", default = 60.0 }
+peak_enhancement = { type = "f32", description = "JONSWAP gamma: 1 = broad sea, 3.3 = typical, higher = single narrow swell", default = 3.3 }
+
+# ── Style (flint_render OceanVisuals) ───────────────────────────────────
+deep_color = { type = "color", description = "Water color in wave shadow (RGBA linear)", default = [0.055, 0.22, 0.53, 1.0] }
+shallow_color = { type = "color", description = "Water color in full light (RGBA linear)", default = [0.16, 0.51, 0.83, 1.0] }
+foam_color = { type = "color", description = "Crest foam color (RGBA linear)", default = [0.96, 0.99, 1.0, 1.0] }
+sss_color = { type = "color", description = "Fake subsurface glow through backlit wave flanks", default = [0.10, 0.75, 0.75, 1.0] }
+foam_threshold = { type = "f32", description = "Jacobian threshold: higher = more foam", default = 0.62 }
+foam_noise_scale = { type = "f32", description = "World-space frequency of foam breakup noise", default = 0.35 }
+ramp_steps = { type = "f32", description = "Cel bands in the diffuse ramp (1-8)", default = 3.0 }
+specular_strength = { type = "f32", description = "Sun glint intensity (0 disables)", default = 1.0 }
+band_wobble = { type = "f32", description = "Ramp edge wobble: noise raggedizes cel band contours (0 = razor edges)", default = 0.2 }
+band_dither = { type = "f32", description = "Halftone dither width at band edges: dots grow/merge across the transition (0 = hard line)", default = 0.0 }
+rain_ripple = { type = "f32", description = "Rain impact-ring density 0..1: expanding rings where drops land, fading out by about 30 m from the camera (0 = off)", default = 0.0 }
+band_dither_scale = { type = "f32", description = "Halftone dot grid frequency in dots per meter", default = 1.5 }
+foam_glow_color = { type = "color", description = "Bioluminescent foam glow color (RGBA linear, emissive teal-green)", default = [0.35, 0.95, 0.75, 1.0] }
+foam_glow = { type = "f32", description = "Bioluminescent glow strength: emissive light from churned foam, brightest at contact foam (0 = off)", default = 0.0 }
+
+# ── Tint (#746): the palette moves toward another, which a game drives ───
+# Render modes 2 (a sea of blood) and 5 (the surface seen from a buried eye)
+# were two of one game's looks in the shader; they are two settings of
+# this. The defaults are the crimson tide, off at tint 0.
+tint = { type = "f32", description = "How far the palette moves to the tint's, 0..1; with tint_pools above 0, also how much of the sea the pools cover (0 = off)", default = 0.0 }
+tint_deep_color = { type = "color", description = "The tint's deep water colour (RGBA linear)", default = [0.10, 0.005, 0.01, 1.0] }
+tint_shallow_color = { type = "color", description = "The tint's shallow water colour (RGBA linear)", default = [0.45, 0.04, 0.05, 1.0] }
+tint_sss_color = { type = "color", description = "The tint's subsurface glow colour (RGBA linear)", default = [0.85, 0.05, 0.03, 1.0] }
+tint_foam_color = { type = "color", description = "The tint's foam colour, the shore foam's too (RGBA linear)", default = [0.95, 0.78, 0.76, 1.0] }
+tint_sky = { type = "color", description = "What the sky's reflection is multiplied by where tinted (RGB; [1, 1, 1] leaves it)", default = [1.1, 0.3, 0.32, 1.0] }
+tint_ramp_steps = { type = "f32", description = "Cel bands where tinted (0 = the sea's own ramp_steps)", default = 2.0 }
+tint_band_wobble = { type = "f32", description = "Added to band_wobble where tinted", default = 0.15 }
+tint_pools = { type = "f32", description = "World-anchored pools, this many per metre, spreading to full cover as tint rises (0 = tint evenly)", default = 0.08 }
+tint_keep_light = { type = "bool", description = "Scale the tint's deep and shallow by the palette's own brightness, so a night sea stays dark", default = true }
+tint_below = { type = "bool", description = "Tint only the surface seen from below, the ceiling over a submerged camera", default = false }
+
+# ── Contact foam (a splash ring round each ocean_contact entity) ────────
+splash_strength = { type = "f32", description = "Contact foam overall gain (0 disables)", default = 1.0 }
+splash_width = { type = "f32", description = "Max foam band width outward from the hull at full churn (m)", default = 0.35 }
+splash_flicker_speed = { type = "f32", description = "Contact foam lapping/flicker animation rate", default = 1.6 }
+splash_noise_scale = { type = "f32", description = "World-space frequency of the contact foam scalloped edge", default = 1.8 }
+splash_baseline = { type = "f32", description = "Churn floor on calm water (0 = foam vanishes when flat)", default = 0.15 }
+splash_response = { type = "f32", description = "Impact speed to churn gain (s/m): how hard waves striking the hull flare the foam", default = 1.0 }
+
+# ── Shoreline foam (where the scene behind the water is shallow) ────────
+shore_foam_width = { type = "f32", description = "Foam where the opaque scene behind the water lies within this many metres below the surface: walls, piers, beaches (0 = off; needs post-processing)", default = 0.0 }
+shore_foam_strength = { type = "f32", description = "Shoreline foam opacity gain", default = 1.0 }
+shore_foam_speed = { type = "f32", description = "Shoreline foam lapping rate (0 = still)", default = 1.0 }
+shore_foam_color = { type = "color", description = "Shoreline foam color (RGBA linear)", default = [0.96, 0.99, 1.0, 1.0] }
+shore_foam_reach = { type = "f32", description = "Measure the shoreline band across the water, to the nearest solid on screen standing up to this many metres above the surface, so it keeps its width from any angle (0 = off: depth along the view ray only)", default = 0.0 }
+
+# ── Refraction / turbidity (requires post-processing) ───────────────────
+turbidity = { type = "f32", description = "Water cloudiness: 0 = glass-clear legs, high = murk in half a meter", default = 0.8 }
+refraction_strength = { type = "f32", description = "Screen-space refraction distortion of underwater objects", default = 0.6 }
+absorption_color = { type = "vec3", description = "Per-channel absorption rate (red dies first in seawater)", default = [0.9, 0.35, 0.22] }
+sky_reflection_strength = { type = "f32", description = "Fresnel-weighted analytic sky reflection (needs a sky component; 0 disables)", default = 0.8 }
+
+# ── Grid ────────────────────────────────────────────────────────────────
+grid_scale = { type = "f32", description = "Inner metric scale of the camera-following grid (m)", default = 60.0 }
+fade_start = { type = "f32", description = "Distance where wave displacement starts fading (m)", default = 90.0 }
+fade_end = { type = "f32", description = "Distance where the ocean is flat (m)", default = 170.0 }

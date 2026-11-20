@@ -1,0 +1,21 @@
+# What the engine and its tools write while you work
+/dist/
+/save/
+/screenshots/
+# Frame captures (the player's, at the root) and `flint capture`'s takes
+# (beside a shot list unless it names an `out`)
+captures/
+# The scope recorder's traces (Shift+F3, --trace-on-hitch)
+traces/
+.flint/procgen-cache/
+.flint/input.user.toml
+.flint/viewer-edits.jsonl
+
+# Rust build output (the engine's, when it is carried at engine/)
+target/
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

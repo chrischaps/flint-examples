@@ -1,0 +1,48 @@
+# A scene's `[post_process]` table: what happens to the picture after the
+# scene is drawn. Every key is optional; an absent table is the defaults.
+#
+#   [post_process]
+#   exposure = 1.2
+#   bloom_intensity = 0.08
+#   fog_enabled = true
+#
+#   [post_process.styles.kuwahara]     # a stylize pass, by name
+#   radius = 5
+#
+# The built-in effects' keys (exposure, bloom_*, ssao_*, fog_*, grade_*,
+# ...) are not written here: each is declared once, with its kind, default,
+# the range it is tuned for and its help, in the effects' descriptors
+# (`flint_schema::post_effects`, #741), and the schema registry adds them to
+# this table. `flint schema post_process` shows them all;
+# `flint render --list-effects` lists them by effect, with their ranges. A
+# layer's own post_process.toml can still declare one, and its line wins.
+#
+# `flint_scene::PostProcessDef` reads the table, and a test holds the schema
+# to that struct's fields. The styles' own parameters are checked by the
+# renderer against its style registry (`flint render --list-styles`).
+
+[table.post_process]
+description = "A scene's [post_process] table: exposure, bloom, SSAO, fog, grading and the stylize passes."
+
+[table.post_process.fields]
+
+look = { type = "string", description = "A look laid under this table's own keys: a styles/<name>.look.toml beside the scene or its parent, or a built-in (ascii_noir, graphite, ...)" }
+styles = { type = "table", description = "Stylize passes by name: [post_process.styles.<style>] with enabled (default true) and the style's parameters, which the renderer checks against its registry" }
+
+# The spellings from before the style tables (#298, #599). They still load,
+# folded into [post_process.styles.kuwahara] and [post_process.styles.contour];
+# a key the style table also sets is the table's.
+kuwahara_enabled = { type = "bool", description = "Old spelling of [post_process.styles.kuwahara] enabled" }
+kuwahara_radius = { type = "i32", min = 0.0, description = "Old spelling of [post_process.styles.kuwahara] radius" }
+kuwahara_sharpness = { type = "f32", description = "Old spelling of [post_process.styles.kuwahara] sharpness" }
+kuwahara_hardness = { type = "f32", description = "Old spelling of [post_process.styles.kuwahara] hardness" }
+kuwahara_anisotropy = { type = "f32", description = "Old spelling of [post_process.styles.kuwahara] anisotropy" }
+kuwahara_boil = { type = "f32", description = "Old spelling of [post_process.styles.kuwahara] boil" }
+contour_enabled = { type = "bool", description = "Old spelling of [post_process.styles.contour] enabled" }
+contour_width = { type = "f32", description = "Old spelling of [post_process.styles.contour] width" }
+contour_threshold = { type = "f32", description = "Old spelling of [post_process.styles.contour] threshold" }
+contour_strength = { type = "f32", description = "Old spelling of [post_process.styles.contour] strength" }
+contour_luma = { type = "f32", description = "Old spelling of [post_process.styles.contour] luma" }
+contour_color = { type = "vec3", description = "Old spelling of [post_process.styles.contour] color" }
+contour_fade = { type = "f32", description = "Old spelling of [post_process.styles.contour] fade" }
+contour_boil = { type = "f32", description = "Old spelling of [post_process.styles.contour] boil" }
