@@ -1,0 +1,85 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Claude Code local settings
+.claude/*
+
+# Worktrees and brainstorming artifacts
+.worktrees/
+.superpowers/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+*.pdb
+
+# Generated docs (rebuild with mdbook build / cargo doc)
+docs/book/book/
+nul
+
+# Test screenshots and render output
+screenshots/
+renders/
+# Frame captures for the frame debugger (#1086): renders of a game's content;
+# and what `flint capture` writes beside a shot list by default (#722)
+captures/
+# The scope recorder's traces (#1097): Shift+F3 and --trace-on-hitch write
+# them to traces/ at the project's root; they name a game's scripts and assets
+traces/
+# ...but not the hand-made ones `flint profile`'s tests read (#1098)
+!/tests/fixtures/traces/
+# What a `flint render` with no --output writes to the working directory,
+# one frame or a sequence (#760)
+render.png
+render_[0-9][0-9][0-9][0-9].png
+/test.png
+
+# Coverage runs (LLVM writes default_*.profraw beside each test process) and
+# Git Bash crash dumps (#760)
+*.profraw
+*.profdata
+lcov.info
+*.stackdump
+
+# Raw/source assets (untracked)
+raw_assets/
+
+# Android build artifacts
+android/app/build/
+android/build/
+android/.gradle/
+android/app/src/main/jniLibs/
+android/app/src/main/assets/
+android/app/src/main/res/mipmap-*/
+android/local.properties
+
+# Architecture analyzer output
+arch-data.json
+!.claude/settings.json
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/next-issue/
+!.claude/skills/close-epic/
+
+# trunk output for the web spike (crates/flint-player/index.html)
+/crates/flint-player/dist/
+# The examples' repository, cloned into the checkout (#984): every
+# `flint-examples/<path>` in the tree is a path once it's here
+/flint-examples/
+
+# Procgen outputs kept between runs (#181); rebuilt on demand
+**/.flint/procgen-cache/
+# What `flint edit` saves write for an agent to read (#679)
+**/.flint/viewer-edits.jsonl
+
+# Python bytecode
+__pycache__/

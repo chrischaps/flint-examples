@@ -1,0 +1,171 @@
+[package]
+name = "flint-player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone player binary for Flint engine"
+
+[lib]
+name = "flint_player"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flint-player"
+path = "src/main.rs"
+
+# A game binary with a procgen generator of its own (#195, ADR 0119).
+[[example]]
+name = "cave_game"
+path = "examples/cave_game/main.rs"
+required-features = ["procgen"]
+
+# A game binary with a Rust style of its own, in two passes (#419).
+[[example]]
+name = "cyanotype"
+path = "examples/cyanotype/main.rs"
+
+# The player in a browser (#99): `trunk serve` in this directory.
+[[bin]]
+name = "flint-web"
+path = "src/bin/flint_web.rs"
+
+[features]
+default = ["debug-hud", "audio", "gamepad", "music", "rhythm", "living", "frame-history"]
+# The always-on frame history (#1076): every frame's phases, clock, present,
+# physics steps and GPU time kept for the last 600 frames, and each judged
+# for a hitch, about 0.65 us a frame. Off (a shipped game that wants none of
+# it), frames are recorded only while `--perf` / `?perf=1` is on, as before,
+# each of the frame's calls a branch. `FLINT_FRAME_HISTORY=0|1` overrides
+# either way at run time.
+frame-history = []
+# The sound card (kira's cpal backend: ALSA on Linux). Off, the player runs
+# silent and a music session's stems don't play, as on a machine without a
+# device (its beat still counts, on the game clock).
+audio = ["flint-audio/device", "flint-music?/device", "flint-rhythm?/device"]
+# Gamepads (gilrs: libudev on Linux). Off, no pad is ever seen; keyboard,
+# mouse, touch and --input-script's pad still work (#221).
+gamepad = ["flint-runtime/gamepad", "flint-input-capture?/gamepad"]
+# The rhythm game (ADR 0117 decision 2, #745): a `music_session` with a
+# `chart` is judged by flint-rhythm (coherence, the ladder, reintegration,
+# the 1 kHz pad capture of flint-input-capture). Off, the player links none
+# of it, and a charted suite plays as music, its chart not judged.
+rhythm = ["music", "dep:flint-rhythm", "dep:flint-input-capture"]
+# A scene's music (#745, #754): a `music_session`'s stems on their buses and
+# the beat for `music_beat()` and the rest, through flint-music. Off, a scene
+# with one says so once at its entry and plays silent, its scripts reading
+# the beat as with no music (-1).
+music = ["dep:flint-music"]
+# Procgen at run time (#754): a `model.asset` or texture named by a
+# `*.procgen.toml` spec is generated at load (or on the frame queue), through
+# flint-procgen, and an extension may register generators. Off, every name is
+# the file loader's, and a scene whose names a spec would have made says so
+# once.
+procgen = ["dep:flint-procgen"]
+# Living props and the wooze field (#211-#252): props that hold and glide,
+# the `[living]` / `[wooze]` tables, shallow wooze, woozy grass, the A/B
+# compare, the `wooze` and `living` script modules, and with `debug-hud` the
+# `debug` one (the A/B and commit calls, #854) and the Living Props panel.
+# Needs procgen, which makes the props' poses. Off, a scene with any of it
+# says so once and stands still.
+living = ["procgen", "flint-debug-ui?/living"]
+# Summonable debug overlay (Phase 4 F8, ADR 0035), and the `debug` script
+# module where living props run (#854). Feature-off builds carry zero debug
+# surface and must still compile.
+debug-hud = ["dep:flint-debug-ui"]
+# The frame profiler (ADR 0109): the frame loop's and the renderer's scopes
+# (and wgpu's own) go to Tracy, and each frame is marked. Off, the scopes
+# compile to nothing. The client listens on loopback only (no firewall
+# prompt) and keeps nothing until a viewer connects.
+profile = ["profiling/profile-with-tracy", "dep:tracy-client"]
+# Flint's own scope recorder in a release build (ADR 0128): the same scopes,
+# kept in a ring per thread. A debug build always has it; this only forwards
+# flint-core's gate, which is where `scope!` decides. Independent of `profile`.
+trace = ["flint-core/trace"]
+
+[dependencies]
+web-time = { workspace = true }
+flint-core = { workspace = true }
+flint-wooze = { workspace = true }
+flint-geometry = { workspace = true }
+flint-asset = { workspace = true }
+flint-schema = { workspace = true }
+flint-ecs = { workspace = true }
+flint-scene = { workspace = true }
+flint-query = { workspace = true }
+flint-render = { workspace = true }
+flint-pixels = { workspace = true }
+flint-runtime = { workspace = true }
+flint-physics = { workspace = true }
+flint-import = { workspace = true }
+flint-audio = { workspace = true }
+flint-music = { workspace = true, optional = true }
+flint-rhythm = { workspace = true, optional = true }
+flint-input-capture = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+flint-animation = { workspace = true }
+flint-particles = { workspace = true }
+flint-terrain = { workspace = true }
+flint-script = { workspace = true }
+rhai = { workspace = true }
+profiling = { workspace = true }
+tracy-client = { workspace = true, optional = true, features = ["only-localhost", "ondemand"] }
+flint-procgen = { workspace = true, optional = true }
+flint-debug-ui = { workspace = true, optional = true }
+bytemuck = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+toml = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+image = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# run_headless_frame: every test's egui frame clears its texture updates
+# (#944), whatever features the tests build with.
+flint-debug-ui = { workspace = true }
+# The browser's mixer, fed what a scene's scripts sent (#730's bus test).
+flint-audio-worklet = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+log = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# ahash (egui, rhai) pulls getrandom 0.3; on the web it needs the JS
+# backend, plus the matching cfg in .cargo/config.toml.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# egui-winit's default `clipboard` feature pulls arboard, which has no web
+# backend. Pinned here rather than inherited so its defaults can go.
+egui-winit = { version = "0.36.2", default-features = false }
+# Async startup (player_app/web_startup.rs), the flint-web entry
+# (src/bin/flint_web.rs, index.html) and its Begin gate for sound (#101),
+# and localStorage for user files (player_app/user_files.rs).
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+# Game bundles stream in chunk by chunk for the progress bar (#98).
+js-sys = "0.3"
+kira = { workspace = true }
+web-sys = { version = "0.3", features = [
+    "Blob", "BlobPropertyBag", "console", "Document", "Element", "HtmlAnchorElement",
+    "HtmlCanvasElement", "HtmlElement", "Location",
+    "MediaQueryList", "Navigator", "Performance", "ReadableStream", "ReadableStreamDefaultReader",
+    "Request", "Response", "Storage", "Url", "UrlSearchParams", "Window",
+] }
+console_error_panic_hook = "0.1"
+tracing-wasm = "0.2"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+egui-winit = { workspace = true }
+# User input overrides live under the OS config directory; on the web they go
+# to localStorage instead (player_app/user_files.rs).
+dirs = { workspace = true }
+
+# Built-in shader modules and frame acquisition go through flint-render's
+# seams; the list is the workspace clippy.toml (#944).
+[lints.clippy]
+disallowed_methods = "deny"
