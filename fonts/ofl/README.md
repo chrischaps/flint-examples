@@ -29,7 +29,7 @@ with `the font has no glyph for '…'`; add it to the font's text in `subset.py`
 again over the original download:
 
 ```text
-python -I -X utf8 examples/fonts/ofl/subset.py <download>/ofl examples/fonts/ofl
+python -I -X utf8 fonts/ofl/subset.py <download>/ofl fonts/ofl
 ```
 
 **Tried and dropped:** Caveat (handwriting, OFL). A proportional script centred in a cell

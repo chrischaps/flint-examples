@@ -1,5 +1,5 @@
 // ─── living_boil_rate.rhai ───────────────────────────────
-// Directs examples/living_boil_rate.scene.toml (#529): the flame's boil ticks
+// Directs living_boil_rate.scene.toml (#529): the flame's boil ticks
 // twice as fast, then at half the spec's pace, then eases back to it. The pose
 // clock is the wooze field's step and doesn't move: only the cards' flicker.
 

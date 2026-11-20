@@ -1,10 +1,10 @@
 """Woozy grass, judged by eye (#252): every variant tried, rendered the same way.
 
     cargo build --release --bin flint
-    python examples/woozy_grove_grass/experiment.py              # all of it, about 4 minutes
-    python examples/woozy_grove_grass/experiment.py --only comb  # one variant
+    python woozy_grove_grass/experiment.py              # all of it, about 4 minutes
+    python woozy_grove_grass/experiment.py --only comb  # one variant
 
-For each variant of the meadow in examples/woozy_grove_grass.scene.toml it writes a
+For each variant of the meadow in woozy_grove_grass.scene.toml it writes a
 4-second GIF from three places (the north path, inside the hush, inside the
 shiver) to renders/woozy_grass/, and prints how the grass moves: of the frame
 pairs at 12 fps, how many change in a crop that holds only grass, and by how much.

@@ -1,10 +1,10 @@
 # The Rusty Flint's single boards: one long, joint-free oak plank with its
-# grain along x. examples/tools/tavern_build.py makes doors, tabletops, the bar
+# grain along x. tools/tavern_build.py makes doors, tabletops, the bar
 # and barrel staves out of separate planks of it, each its own slice of the
 # texture, where the floor texture would put butt joints in the middle of a
 # door.
 #
-#   flint gen examples/specs/tavern_plank.procgen.toml -o examples/textures/tavern/tavern_plank.png
+#   flint gen specs/tavern_plank.procgen.toml -o textures/tavern/tavern_plank.png
 
 generator = "texture_v1"
 

@@ -10,8 +10,8 @@
 #
 # The script (scripts/pencil_rolling.rhai) moves them on game time:
 #
-#   cargo run --bin flint -- render examples/pencil_rolling.scene.toml --no-grid --scripts --time 0.5..2.5 --fps 24 -o roll/f-%05d.png
-#   cargo run --bin flint -- render examples/pencil_rolling.scene.toml --no-grid --scripts --time 0..8 --fps 12 -o roll.gif
+#   flint render pencil_rolling.scene.toml --no-grid --scripts --time 0.5..2.5 --fps 24 -o roll/f-%05d.png
+#   flint render pencil_rolling.scene.toml --no-grid --scripts --time 0..8 --fps 12 -o roll.gif
 #
 # Book: concepts/stylize-passes.md
 

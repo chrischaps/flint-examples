@@ -1,13 +1,13 @@
-# Bloom that follows a style (#300). `neon` (examples/styles/neon.*) is an hdr
+# Bloom that follows a style (#300). `neon` (styles/neon.*) is an hdr
 # user style: it dims the scene to night and traces world height in lines
 # brighter than white. Its .shader.toml says `feeds_bloom = true`, so bloom
 # reads the styled picture and the lines glow. Without it, bloom reads the
 # scene under the style: the lines stay flat, and the lamp, dimmed by the
 # style, still haloes at full strength, a ghost of the unstyled frame.
 #
-#   cargo run --bin flint -- render examples/neon_bloom.scene.toml --output neon.png
-#   cargo run --bin flint -- render examples/neon_bloom.scene.toml --style neon:feeds_bloom=0
-#   cargo run --bin flint -- render examples/neon_bloom.scene.toml --sweep neon.feeds_bloom=0,1
+#   flint render neon_bloom.scene.toml --output neon.png
+#   flint render neon_bloom.scene.toml --style neon:feeds_bloom=0
+#   flint render neon_bloom.scene.toml --sweep neon.feeds_bloom=0,1
 #
 # Kuwahara keeps bloom on the original scene by default; a scene opts it in
 # with [post_process.styles.kuwahara] feeds_bloom = true (or

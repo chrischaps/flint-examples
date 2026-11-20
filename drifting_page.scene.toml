@@ -1,10 +1,10 @@
 # A page whose writing reflows (#576): a thin form made only of its lines of
 # strokes, the words drifting along them, sliding out under one margin and in
-# under the other. Its spec is examples/specs/drifting_page.procgen.toml.
+# under the other. Its spec is specs/drifting_page.procgen.toml.
 #
-#   cargo run --bin flint -- render examples/drifting_page.scene.toml --time 0..8 -o page.gif
-#   cargo run --bin flint -- render examples/drifting_page.scene.toml --scripts --time 0..12 -o speaking.gif
-#   cargo run --bin flint-player -- examples/drifting_page.scene.toml
+#   flint render drifting_page.scene.toml --time 0..8 -o page.gif
+#   flint render drifting_page.scene.toml --scripts --time 0..12 -o speaking.gif
+#   flint-player drifting_page.scene.toml
 #
 # With --scripts, scripts/drifting_page.rhai speaks through the rows: phrases
 # that quicken the drift and pauses that all but hold it, set with

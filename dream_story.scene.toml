@@ -2,7 +2,7 @@
 # whole world into a painted dream and wakes it again (#369). Nothing here
 # is styled until scripts/dream_story.rhai says so:
 #
-#   cargo run --bin flint-player -- examples/dream_story.scene.toml
+#   flint-player dream_story.scene.toml
 #
 #   0 s  awake: the clearing as it is
 #   2 s  falling asleep: Kuwahara fades in (blend 0 -> 1) as its brush grows

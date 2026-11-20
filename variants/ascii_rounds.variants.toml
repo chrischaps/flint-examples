@@ -2,10 +2,10 @@
 # the first round's continuous ramp with no edges, the second round's banded
 # tone over a wider footprint, and the second round's edges on top.
 #
-#   flint render examples/phase4_runtime.scene.toml --variants examples/variants/ascii_rounds.variants.toml -o tavern.png
-#   flint render examples/mesh_meadow.scene.toml    --variants examples/variants/ascii_rounds.variants.toml -o meadow.png
-#   flint render examples/campfire.scene.toml       --variants examples/variants/ascii_rounds.variants.toml -o campfire.png
-#   flint render examples/pbr_test.scene.toml       --variants examples/variants/ascii_rounds.variants.toml -o pbr.png
+#   flint render phase4_runtime.scene.toml --variants variants/ascii_rounds.variants.toml -o tavern.png
+#   flint render mesh_meadow.scene.toml    --variants variants/ascii_rounds.variants.toml -o meadow.png
+#   flint render campfire.scene.toml       --variants variants/ascii_rounds.variants.toml -o campfire.png
+#   flint render pbr_test.scene.toml       --variants variants/ascii_rounds.variants.toml -o pbr.png
 #
 # A --zoom on the command line adds to this file's (none here: where to look
 # depends on the scene).

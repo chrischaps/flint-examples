@@ -1,6 +1,6 @@
-# grove_oak under another name, for examples/living_compare.scene.toml (#246).
+# grove_oak under another name, for living_compare.scene.toml (#246).
 #
-# Everything below is examples/specs/grove_oak.procgen.toml, unchanged but for meta.name. A species is a spec,
+# Everything below is specs/grove_oak.procgen.toml, unchanged but for meta.name. A species is a spec,
 # so this is a second species that grows the very same tree: the same lineage
 # seed gives the same skeleton (the living props' tests check that). A scene can then
 # give it values of its own in [living.species.grove_oak_twin] and stand it beside

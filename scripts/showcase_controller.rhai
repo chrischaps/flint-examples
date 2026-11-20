@@ -1,12 +1,12 @@
 // Showcase Controller — the pause menu and the game's states.
-// The menu is a UI document (examples/ui/pause.ui.toml, #731): the engine
+// The menu is a UI document (ui/pause.ui.toml, #731): the engine
 // moves focus with the keys, a pad, the mouse and touch, and says what the
-// player chose in on_ui. Escape opens and closes it (examples/input_showcase.toml).
+// player chose in on_ui. Escape opens and closes it (input_showcase.toml).
 // Demonstrates: load_ui(), on_ui(), scripts/lib/menu.rhai, register_state(),
 // set_post("radial_blur"), set_audio_lowpass(), quit_game().
 
 import "menu" as menu;
-load_ui("examples/ui/pause.ui.toml");
+load_ui("ui/pause.ui.toml");
 
 fn on_init() {
     register_state("paused", #{ physics: "pause", scripts: "pause", animation: "pause", particles: "pause", audio: "run" });

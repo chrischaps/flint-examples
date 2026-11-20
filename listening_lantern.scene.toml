@@ -9,9 +9,9 @@
 #
 # Played from a file on the game clock, or from a socket:
 #
-#   flint play examples/listening_lantern.scene.toml \
-#     --expression-timeline examples/listening_lantern.timeline.json
-#   flint play examples/listening_lantern.scene.toml --expression-listen 127.0.0.1:7777
+#   flint play listening_lantern.scene.toml \
+#     --expression-timeline listening_lantern.timeline.json
+#   flint play listening_lantern.scene.toml --expression-listen 127.0.0.1:7777
 #
 # With the socket open, a client sends `{"state": "speaking", "energy": 0.8}`
 # and then `{"capture": "look.png"}`: the next frame the window presents is

@@ -15,9 +15,9 @@
 #  control point has gap_after, so every sweep stops, caps itself and
 #  starts again past the gap.
 #
-#  Render:  cargo run --bin flint -- render examples/sweep_garden.scene.toml \
+#  Render:  flint render sweep_garden.scene.toml \
 #             --output renders/sweep_garden.png --no-grid
-#  Check:   cargo run --bin flint -- check examples/sweep_garden.scene.toml
+#  Check:   flint check sweep_garden.scene.toml
 # ================================================================
 
 [scene]

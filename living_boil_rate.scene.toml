@@ -1,5 +1,5 @@
 # The boil's pace, live (#529): one held flame whose leaf cards flicker on the
-# jitter clock, a step of 0.125 s in its spec. examples/scripts/living_boil_rate.rhai
+# jitter clock, a step of 0.125 s in its spec. scripts/living_boil_rate.rhai
 # asks `tune_living` for a jitter rate, times that pace:
 #
 #   2.0 s: jitter_rate 2   (twice as fast, at once)
@@ -9,10 +9,10 @@
 # No card turns at a change: the jitter clock moves on at the new rate from
 # where it stands, so each card holds what it shows until its next tick.
 #
-#   cargo run --bin flint-player -- examples/living_boil_rate.scene.toml
-#   cargo run --bin flint -- render examples/living_boil_rate.scene.toml --scripts --time 1.5..2.5 -o frames/f-%05d.png
+#   flint-player living_boil_rate.scene.toml
+#   flint render living_boil_rate.scene.toml --scripts --time 1.5..2.5 -o frames/f-%05d.png
 #
-# The spec is specs/examples/form_living.procgen.toml.
+# The spec is engine/specs/examples/form_living.procgen.toml.
 
 [scene]
 name = "Living Boil Rate"

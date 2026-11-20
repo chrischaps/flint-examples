@@ -1,8 +1,8 @@
 # Style Terrain: a hillside drawn in glyphs under props that stay smooth,
 # and a styled glass you look through (#310). It renders as is:
 #
-#   cargo run --bin flint -- render examples/style_terrain.scene.toml --output terrain.png --no-grid
-#   cargo run --bin flint -- render examples/style_terrain.scene.toml --debug-mode style --output mask.png --no-grid
+#   flint render style_terrain.scene.toml --output terrain.png --no-grid
+#   flint render style_terrain.scene.toml --debug-mode style --output mask.png --no-grid
 #
 # The ground is a heightmap terrain with an ascii_style: its chunks go into
 # the style mask like any styled mesh, so ASCII draws the hills, and every

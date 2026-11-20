@@ -1,23 +1,23 @@
 # Wooze props (#252): what else gets the wooze, beside a living oak.
 #
-# The experiment pass after #251's shortlist (docs/design/living-props-beyond-trees.md).
+# The experiment pass after #251's shortlist (engine/docs/design/living-props-beyond-trees.md).
 # Each target stands on the left with the wooze and on the right without it, on the
 # grove's linklater field, so a still twin shows what "pasted in" looks like:
 #
-#   the vine      `garden_vine` with a [living] table and no code (examples/specs/grove_vine).
+#   the vine      `garden_vine` with a [living] table and no code (specs/grove_vine).
 #                 Left it lives, right it's the same lineage baked once.
 #   the beetle    `creature_v1`'s beetle under `shallow_wooze`, no code
-#                 (examples/specs/grove_beetle). Left it swells and settles, right it holds.
+#                 (specs/grove_beetle). Left it swells and settles, right it holds.
 #
 # The oak behind them is the grove's, for the look the props have to belong beside.
 # The experiment also plays the beetles with the showcase creatures' wall-clock bob
-# (examples/scripts/beetle_idle.rhai) to see whether it fights the beat. The fourth
+# (scripts/beetle_idle.rhai) to see whether it fights the beat. The fourth
 # target, a noise pose for pine, isn't in the engine: it's a prototype in
-# `living_spike`. examples/wooze_props/README.md has the verdicts.
+# `living_spike`. wooze_props/README.md has the verdicts.
 #
-#   python examples/wooze_props/experiment.py          # every capture, GIFs and the measure
-#   cargo run --release --bin flint -- render examples/wooze_props.scene.toml --time 0..4 --fps 12 --output strip.gif
-#   cargo run --release --bin flint -- play examples/wooze_props.scene.toml
+#   python wooze_props/experiment.py          # every capture, GIFs and the measure
+#   flint render wooze_props.scene.toml --time 0..4 --fps 12 --output strip.gif
+#   flint play wooze_props.scene.toml
 
 [scene]
 name = "Wooze Props"

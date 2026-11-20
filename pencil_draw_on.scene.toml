@@ -3,8 +3,8 @@
 # `transition = "draw"`, and scripts/pencil_draw_on.rhai moves only the
 # blend:
 #
-#   cargo run --bin flint-player -- examples/pencil_draw_on.scene.toml
-#   cargo run --bin flint -- render examples/pencil_draw_on.scene.toml --scripts --time 1 --output half.png
+#   flint-player pencil_draw_on.scene.toml
+#   flint render pencil_draw_on.scene.toml --scripts --time 1 --output half.png
 #
 #   0 s  the crate's outline starts to grow, its hatching after it, the
 #        paper's wash last; drawn by 2 s

@@ -5,8 +5,8 @@
 # (at most 4096 turns a run, ADR 0112), so a bad bound draws a wrong pixel
 # instead of hanging the GPU.
 #
-#   flint render examples/user_styles.scene.toml --style radial_blur
-#   flint render examples/user_styles.scene.toml --style radial_blur:samples=48,strength=0.2
+#   flint render user_styles.scene.toml --style radial_blur
+#   flint render user_styles.scene.toml --style radial_blur:samples=48,strength=0.2
 version = 1
 name = "radial_blur"
 label = "Radial blur"

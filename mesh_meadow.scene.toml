@@ -1,10 +1,10 @@
 # Mesh Meadow: compute grass on a plain mesh ground, under a painted mask
-# (ADR 0089). No terrain: the ground is a box, and examples/mesh_meadow/mask.png
+# (ADR 0089). No terrain: the ground is a box, and mesh_meadow/mask.png
 # says where the grass grows. It thins toward the rim and in grey patches,
 # and leaves a winding path and a clearing bare.
 #
-#   cargo run --bin flint -- play examples/mesh_meadow.scene.toml
-#   cargo run --bin flint -- render examples/mesh_meadow.scene.toml --output meadow.png
+#   flint play mesh_meadow.scene.toml
+#   flint render mesh_meadow.scene.toml --output meadow.png
 
 [scene]
 name = "Mesh Meadow"

@@ -3,8 +3,8 @@
 # function; the framework writes the bindings, the params struct and the
 # entry points around it.
 #
-#   flint render examples/user_styles.scene.toml --style risograph
-#   flint render examples/user_styles.scene.toml --style risograph:dot=6,shift=3
+#   flint render user_styles.scene.toml --style risograph
+#   flint render user_styles.scene.toml --style risograph:dot=6,shift=3
 version = 1
 name = "risograph"
 label = "Risograph"

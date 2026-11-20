@@ -2,7 +2,7 @@
 # washed ochre long ago and yellowed by smoke. Faint strata are the trowel's
 # passes.
 #
-#   flint gen examples/specs/tavern_plaster.procgen.toml -o examples/textures/tavern/tavern_plaster.png
+#   flint gen specs/tavern_plaster.procgen.toml -o textures/tavern/tavern_plaster.png
 
 generator = "texture_v1"
 

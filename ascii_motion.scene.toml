@@ -8,7 +8,7 @@
 # headless (#345), the same orbit as the script below, glyphs counted from
 # the style's own grid:
 #
-#   flint render examples/ascii_motion.scene.toml --no-grid \
+#   flint render ascii_motion.scene.toml --no-grid \
 #     --width 1280 --height 720 --frames 181 --orbit 6.8755 --no-images --flip-stats
 #
 # and again with --style ascii:temporal=off. Add --style ascii:edges=0 to
@@ -16,7 +16,7 @@
 # (#477): 0.9 reversals a frame with them on, 38.2 before.
 # The player's capture, with the script, is the other way:
 #
-#   cargo run --bin flint-player -- examples/ascii_motion.scene.toml \
+#   flint-player ascii_motion.scene.toml \
 #     --frame-step 0.0166667 --screenshot out/on.png --screenshot-every 0.0166667 --exit-after 3
 #
 # with tools/ascii_flips.py counting glyphs from the PNGs.

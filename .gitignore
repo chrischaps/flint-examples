@@ -1,0 +1,9 @@
+# What flint commands write here, never committed
+/dist/
+renders/
+render.png
+*.flintframe/
+.flint/
+
+# The engine subtree's build output
+/engine/target/

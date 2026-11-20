@@ -1,4 +1,4 @@
-"""Write examples/shear_road.scene.toml (and, with --yaw, the yawed "before").
+"""Write shear_road.scene.toml (and, with --yaw, the yawed "before").
 
 A scanline racer's road (#625): tiles of 8 m laid down the screen, a curve
 being each tile pushed sideways by its distance (x += dx; dx += curve) and a
@@ -8,8 +8,8 @@ road's edges, lane lines and the wide ground stay continuous. With --yaw the
 same road is laid by turning each tile instead: wide tiles swing their far
 corners through their neighbours, which is why the issue asked for shear.
 
-    python examples/tools/shear_road.py            # examples/shear_road.scene.toml
-    python examples/tools/shear_road.py --yaw      # examples/shear_road_yawed.scene.toml
+    python tools/shear_road.py            # shear_road.scene.toml
+    python tools/shear_road.py --yaw      # shear_road_yawed.scene.toml
 """
 
 import math
@@ -60,12 +60,12 @@ def main():
     w("#")
     w("#  A scanline racer's road: 8 m tiles, each pushed sideways and up by")
     w("#  its distance (x += dx; dx += curve). Written by")
-    w("#  examples/tools/shear_road.py; edit that, not this.")
+    w("#  tools/shear_road.py; edit that, not this.")
     w("#")
     if yaw:
         w("#  Each tile is YAWED to point at the next one, the old way: the")
         w("#  120 m ground and the road's edges swing their far corners through")
-        w("#  the neighbouring tiles. Compare examples/shear_road.scene.toml.")
+        w("#  the neighbouring tiles. Compare shear_road.scene.toml.")
     else:
         w("#  Each tile is ONE entity with transform.shear = { xz, yz }: x and y")
         w("#  move with z, so a tile's near edge lands exactly on the last one's")
@@ -74,11 +74,11 @@ def main():
         w("#  scripts/shear_road.rhai re-lays it every frame with set_shear,")
         w("#  the bend breathing right to left and back.")
     w("#")
-    w("#  Render:  cargo run --bin flint -- render examples/shear_road.scene.toml \\")
+    w("#  Render:  flint render shear_road.scene.toml \\")
     w("#             --output renders/shear_road.png --no-grid")
     if not yaw:
         w("#  Moving:  ... --scripts --time 0..10.5 --fps 12 -o renders/shear_road.gif")
-    w("#  Play:    cargo run --bin flint -- play examples/shear_road.scene.toml")
+    w("#  Play:    flint play shear_road.scene.toml")
     w("# ================================================================")
     w("")
     w("[scene]")

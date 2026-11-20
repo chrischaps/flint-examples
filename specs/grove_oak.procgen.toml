@@ -4,7 +4,7 @@
 # one method whose structure holds still while its shape drifts. No [[lod]] here:
 # a skinned rest is one level, and #193 stacks the levels when one is baked to GLB.
 #
-#   flint gen examples/specs/grove_oak.procgen.toml --strip -o oak.png
+#   flint gen specs/grove_oak.procgen.toml --strip -o oak.png
 
 generator = "tree_v1"
 

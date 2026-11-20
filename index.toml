@@ -1,16 +1,16 @@
-# The examples (#763): every scene under examples/, what it is for, and
+# The examples (#763): every scene in this repository, what it is for, and
 # which part of the engine it shows. `flint examples` lists them,
 # `flint examples --topic stylize` narrows the list, and
 # `flint examples --check` fails when a scene here is missing, a scene on
 # disk isn't here, or any of them fails `flint validate`. CI runs the check.
 #
 # These are curated: improve one freely. Nothing pins their pixels. The
-# goldens and CLI tests load frozen copies under tests/fixtures/scenes/,
+# goldens and CLI tests load frozen copies in Flint's tests/fixtures/scenes/,
 # so a change here never re-blesses a golden (and a change there is a
 # change to a test, made on purpose).
 #
 # A new example gets an entry; a scene that only a test needs goes in
-# tests/fixtures/scenes/ instead, and a whole film or place made to be
+# Flint's tests/fixtures/scenes/ instead, and a whole film or place made to be
 # watched rather than to show one feature goes in the demos repository,
 # https://github.com/chrischaps/flint-demos (Understudy and the Luminarium
 # moved there on 2026-11-17). Topics are free text, but keep to the

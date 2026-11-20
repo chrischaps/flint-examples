@@ -12,9 +12,9 @@
 #  only the hemisphere ambient, so they read as soft, flat paper
 #  shapes; the unlit bars ignore it.
 #
-#  Render:  cargo run --bin flint -- render examples/unlit_ambient.scene.toml \
+#  Render:  flint render unlit_ambient.scene.toml \
 #             --output renders/unlit_ambient.png --no-grid
-#  Play:    cargo run --bin flint-player -- examples/unlit_ambient.scene.toml \
+#  Play:    flint-player unlit_ambient.scene.toml \
 #             --exit-after 3
 #           ([perf] reads "0 in shadows")
 # ================================================================

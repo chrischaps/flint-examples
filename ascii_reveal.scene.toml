@@ -2,7 +2,7 @@
 # glyphs and back (#278). scripts/ascii_reveal.rhai gives each its look at
 # blend 0 and then moves only the blend:
 #
-#   cargo run --bin flint-player -- examples/ascii_reveal.scene.toml
+#   flint-player ascii_reveal.scene.toml
 #
 #   0 s    everything smooth
 #   1-4 s  barrel dissolves into green phosphor glyphs (transition = "dissolve")

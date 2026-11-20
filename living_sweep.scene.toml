@@ -1,8 +1,8 @@
-# Living Props sweep (#218): the grove of examples/living_props.scene.toml with a hand
+# Living Props sweep (#218): the grove of living_props.scene.toml with a hand
 # on every slider of the F3 panel, so a run can say whether a live change ever
-# leaves a frame without a pose. See examples/scripts/living_sweep.rhai.
+# leaves a frame without a pose. See scripts/living_sweep.rhai.
 #
-#   cargo run --release -p flint-player -- examples/living_sweep.scene.toml --exit-after 102
+#   cargo run --release -p flint-player -- living_sweep.scene.toml --exit-after 102
 #
 # The lines to read are `frames missing a pose in use` and `kept their last bones`.
 # Both should say 0. Open the panel with F3 to watch the knobs move.

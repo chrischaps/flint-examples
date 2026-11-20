@@ -5,10 +5,10 @@
 # fires `look_faded` to start the next hold. The scene's own keys (its
 # exposure and vignette) stay under every look.
 #
-#   cargo run --bin flint-player -- examples/look_fade.scene.toml
-#   cargo run --bin flint-player -- examples/look_fade.scene.toml \
+#   flint-player look_fade.scene.toml
+#   flint-player look_fade.scene.toml \
 #     --frame-step 0.0333333 --screenshot-every out/fade --exit-after 4
-#   cargo run --bin flint -- render examples/look_fade.scene.toml --scripts --time 2.5 -o mid.png
+#   flint render look_fade.scene.toml --scripts --time 2.5 -o mid.png
 #
 # F4 -> Look has a Fade time beside the picker: pick a look with it above
 # 0 and the player eases to it too.

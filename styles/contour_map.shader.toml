@@ -2,7 +2,7 @@
 # that name to the built-in ink style): a surveyor's map laid over
 # the picture, ink isolines of world height and range rings round the eye.
 #
-#   flint render examples/user_styles.scene.toml --style contour_map
+#   flint render user_styles.scene.toml --style contour_map
 version = 1
 name = "contour_map"
 label = "Survey contours"

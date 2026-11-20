@@ -1,5 +1,5 @@
 // ─── living_sweep.rhai ───────────────────────────────────
-// Directs examples/living_sweep.scene.toml: a hand on every slider of the F3 Living
+// Directs living_sweep.scene.toml: a hand on every slider of the F3 Living
 // Props panel, end to end, so a run's [living] lines can say whether any frame
 // went without a pose.
 //

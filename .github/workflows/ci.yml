@@ -1,0 +1,39 @@
+# The examples' CI (Flint #984): every scene here is in index.toml and passes
+# what `flint validate` checks, with the engine this repository carries at
+# engine/. No GPU needed: the headless CLI (no sound card, gamepads or file
+# dialogs, so no device headers on Linux) is all `flint examples --check`
+# runs.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  examples:
+    name: flint examples --check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: headless
+
+      - name: Build the engine's headless CLI
+        run: cargo build --manifest-path engine/Cargo.toml -p flint-cli --no-default-features --bin flint
+
+      # The index matches the folder, and every scene validates: a scene on
+      # disk with no entry, an entry with no file, an empty topic or
+      # purpose, or a scene with an error diagnostic fails it.
+      - name: flint examples --check
+        run: engine/target/debug/flint examples --check

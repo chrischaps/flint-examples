@@ -4,7 +4,7 @@
 #
 #  A scanline racer's road: 8 m tiles, each pushed sideways and up by
 #  its distance (x += dx; dx += curve). Written by
-#  examples/tools/shear_road.py; edit that, not this.
+#  tools/shear_road.py; edit that, not this.
 #
 #  Each tile is ONE entity with transform.shear = { xz, yz }: x and y
 #  move with z, so a tile's near edge lands exactly on the last one's
@@ -13,10 +13,10 @@
 #  scripts/shear_road.rhai re-lays it every frame with set_shear,
 #  the bend breathing right to left and back.
 #
-#  Render:  cargo run --bin flint -- render examples/shear_road.scene.toml \
+#  Render:  flint render shear_road.scene.toml \
 #             --output renders/shear_road.png --no-grid
 #  Moving:  ... --scripts --time 0..10.5 --fps 12 -o renders/shear_road.gif
-#  Play:    cargo run --bin flint -- play examples/shear_road.scene.toml
+#  Play:    flint play shear_road.scene.toml
 # ================================================================
 
 [scene]

@@ -18,8 +18,8 @@
 #  Every jointed body is a transform CHILD of its parent so it is
 #  authored in local space and simulated in world space.
 #
-#  Launch:  cargo run --bin flint -- play examples/joint_test.scene.toml
-#  Render:  cargo run --bin flint -- render examples/joint_test.scene.toml \
+#  Launch:  flint play joint_test.scene.toml
+#  Render:  flint render joint_test.scene.toml \
 #             --output renders/joint_test.png
 # ================================================================
 

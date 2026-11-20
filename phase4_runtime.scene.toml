@@ -22,12 +22,12 @@
 #    * Spatial audio with distance attenuation
 #
 #  The room (architecture, furniture, lights, doors, sounds) is the prefab
-#  examples/prefabs/rusty_flint.prefab.toml, shared with showcase_tavern; its
-#  models and textures are built by examples/tools/tavern_build.py (#295).
+#  prefabs/rusty_flint.prefab.toml, shared with showcase_tavern; its
+#  models and textures are built by tools/tavern_build.py (#295).
 #
-#  Launch:  cargo run --bin flint-player -- examples/phase4_runtime.scene.toml
-#     or:   cargo run --bin flint -- play examples/phase4_runtime.scene.toml
-#  Look:    flint render examples/phase4_runtime.scene.toml -o tavern.png
+#  Launch:  flint-player phase4_runtime.scene.toml
+#     or:   flint play phase4_runtime.scene.toml
+#  Look:    flint render phase4_runtime.scene.toml -o tavern.png
 #           (the [camera] below frames the room from beside the front door)
 #
 #  Controls:

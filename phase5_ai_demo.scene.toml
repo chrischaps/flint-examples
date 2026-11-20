@@ -7,12 +7,12 @@
 #  assets declares an [asset_def] component describing the intent.
 #
 #  Resolution:
-#    flint asset resolve examples/phase5_ai_demo.scene.toml --strategy ai_generate --style medieval_tavern
-#    flint asset resolve examples/phase5_ai_demo.scene.toml --strategy human_task --output-dir tasks/
-#    flint asset resolve examples/phase5_ai_demo.scene.toml --strategy ai_then_human --style medieval_tavern
+#    flint asset resolve phase5_ai_demo.scene.toml --strategy ai_generate --style medieval_tavern
+#    flint asset resolve phase5_ai_demo.scene.toml --strategy human_task --output-dir tasks/
+#    flint asset resolve phase5_ai_demo.scene.toml --strategy ai_then_human --style medieval_tavern
 #
 #  After resolving, play the scene:
-#    cargo run --bin flint -- play examples/phase5_ai_demo.scene.toml
+#    flint play phase5_ai_demo.scene.toml
 #
 # ================================================================
 

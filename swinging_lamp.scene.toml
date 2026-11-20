@@ -7,8 +7,8 @@
 # It casts (`cast_shadows`, #504), so each stone's shadow swings out from
 # under it, opposite the lamp, as the beam passes over.
 #
-#   flint render examples/swinging_lamp.scene.toml --scripts --time 0..4 --fps 12 -o lamp.gif
-#   flint play examples/swinging_lamp.scene.toml
+#   flint render swinging_lamp.scene.toml --scripts --time 0..4 --fps 12 -o lamp.gif
+#   flint play swinging_lamp.scene.toml
 
 [scene]
 name = "Swinging Lamp"

@@ -1,9 +1,9 @@
 # A glyph set to tune against (#323): the built-in 8x8 cells with ramps of
-# its own. `examples/ascii_tidepool.scene.toml` names it as `font = "tidepool"`.
+# its own. `ascii_tidepool.scene.toml` names it as `font = "tidepool"`.
 #
 # Edit a ramp here with `flint edit` or `flint play` open on that scene and
 # the frame redraws with it within a second; no restart. Same for
-# `examples/palettes/tidepool.palette.toml`.
+# `palettes/tidepool.palette.toml`.
 
 default_ramp = "swell"
 

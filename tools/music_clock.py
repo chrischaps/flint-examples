@@ -1,4 +1,4 @@
-"""The two stems of examples/music_clock.scene.toml (#745).
+"""The two stems of music_clock.scene.toml (#745).
 
 Eight bars at 96 bpm in 4/4, 20 seconds, at 22050 Hz, mono:
 
@@ -11,10 +11,10 @@ Eight bars at 96 bpm in 4/4, 20 seconds, at 22050 Hz, mono:
 
 The suite names the first four bars `dawn` and the last four `rise`, and its
 event script opens the pad's low-pass on the way into `rise`. Deterministic.
-Writes examples/music/stems/{pad,bell}.flac (through ffmpeg, which must be on
+Writes music/stems/{pad,bell}.flac (through ffmpeg, which must be on
 PATH: FLAC keeps the stems small and lossless, so they stay sample-locked).
 
-    python examples/tools/music_clock.py
+    python tools/music_clock.py
 """
 
 import math

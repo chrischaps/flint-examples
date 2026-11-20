@@ -3,9 +3,9 @@
 # picked by the scene; save either PNG while the game runs and the next
 # frames draw it.
 #
-#   flint render examples/user_styles.scene.toml --style darkroom
-#   flint render examples/user_styles.scene.toml --style darkroom:grade=luts/cyanotype.png,paper=papers/washi.png
-#   flint render examples/user_styles.scene.toml --sweep darkroom.grade=luts/neutral.png,luts/warm_print.png,luts/bleach.png,luts/cyanotype.png
+#   flint render user_styles.scene.toml --style darkroom
+#   flint render user_styles.scene.toml --style darkroom:grade=luts/cyanotype.png,paper=papers/washi.png
+#   flint render user_styles.scene.toml --sweep darkroom.grade=luts/neutral.png,luts/warm_print.png,luts/bleach.png,luts/cyanotype.png
 #
 # The LUTs and papers come from tools/darkroom_images.py.
 version = 1

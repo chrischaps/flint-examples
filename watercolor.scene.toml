@@ -2,7 +2,7 @@
 # watercolor on paper and the rest of the world left as it is (#272). It
 # renders as is:
 #
-#   cargo run --bin flint -- render examples/watercolor.scene.toml --output watercolor.png
+#   flint render watercolor.scene.toml --output watercolor.png
 #
 # The [post_process.styles.watercolor] table is the scene's preset for every
 # painted prop (scope = "entities" keeps it from covering the whole frame);
@@ -16,8 +16,8 @@
 # not. It loads only light assets, so it is the per-entity watercolor
 # golden too. Or paint any scene from the command line:
 #
-#   flint render examples/mesh_meadow.scene.toml --style watercolor
-#   flint render examples/mesh_meadow.scene.toml --look watercolor
+#   flint render mesh_meadow.scene.toml --style watercolor
+#   flint render mesh_meadow.scene.toml --look watercolor
 
 [scene]
 name = "Watercolor"

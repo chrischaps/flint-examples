@@ -1,6 +1,6 @@
 """The grass mask of the Woozy Grove's meadow variant (#252).
 
-    python examples/woozy_grove_grass/make_mask.py
+    python woozy_grove_grass/make_mask.py
 
 Writes mask.png beside this file: 512 px over the 60 m square from (-30, -30) to
 (30, 30), pixel (0, 0) at the minimum corner and rows running toward +Z, as the
@@ -9,7 +9,7 @@ Writes mask.png beside this file: 512 px over the 60 m square from (-30, -30) to
 The meadow is worn where people have walked: round the bench, along the path in
 from the north and out to each of the three pockets. It thins at every trunk,
 where roots and shade keep it short, and in the hush, where the cypress drop
-their needles. Tree positions are the grove's own (examples/woozy_grove.scene.toml).
+their needles. Tree positions are the grove's own (woozy_grove.scene.toml).
 """
 
 from pathlib import Path

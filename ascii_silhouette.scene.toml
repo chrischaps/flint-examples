@@ -5,7 +5,7 @@
 # `outline` inks the entity's own pixels along its mask edge, and
 # `min_coverage` floors the ink of a cell the entity only grazes.
 #
-#   cargo run --bin flint -- render examples/ascii_silhouette.scene.toml --output bench.png --no-grid
+#   flint render ascii_silhouette.scene.toml --output bench.png --no-grid
 #
 # The whole frame in glyphs, for comparison:
 #   ... --style ascii:scope=screen

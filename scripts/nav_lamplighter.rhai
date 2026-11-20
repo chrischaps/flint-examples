@@ -1,5 +1,5 @@
 // ─── nav_lamplighter.rhai ─────────────────────────────────
-// The lamplighter of examples/nav_lamplighter.scene.toml (#969). It asks
+// The lamplighter of nav_lamplighter.scene.toml (#969). It asks
 // find_path for the way to the next unlit lantern (round the hedges, up the
 // terrace's ramp), walks it with move_along_path, lights the lantern, rests
 // a moment and goes on. The way ahead is drawn on the ground as it walks.

@@ -1,7 +1,7 @@
 # ASCII Entities: the mesh meadow's clearing again, with a few props drawn
 # in glyphs and the rest of the world left smooth (#266). It renders as is:
 #
-#   cargo run --bin flint -- render examples/ascii_entities.scene.toml --output ascii.png
+#   flint render ascii_entities.scene.toml --output ascii.png
 #
 # The [post_process.styles.ascii] table is the scene's preset for every
 # styled prop (scope = "entities" keeps it from covering the whole frame);

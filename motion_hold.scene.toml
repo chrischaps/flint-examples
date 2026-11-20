@@ -16,9 +16,9 @@
 # so the held bob swings at 60 Hz in the world and stays the mirror of the
 # smooth one; only where it is drawn steps.
 #
-#   cargo run --bin flint -- play examples/motion_hold.scene.toml
-#   cargo run --bin flint-player -- examples/motion_hold.scene.toml --frame-step 0.0208333 --screenshot-every 0.0208333 --screenshot frames/f.png --exit-after 2
-#   cargo run --bin flint -- render examples/motion_hold.scene.toml --no-grid --anim-time 0 --time 0..2 --fps 24 -o twos.gif
+#   flint play motion_hold.scene.toml
+#   flint-player motion_hold.scene.toml --frame-step 0.0208333 --screenshot-every 0.0208333 --screenshot frames/f.png --exit-after 2
+#   flint render motion_hold.scene.toml --no-grid --anim-time 0 --time 0..2 --fps 24 -o twos.gif
 #
 # --set post.motion_hold=12 on flint render (--motion-hold 12 on flint play
 # and flint-player) puts the whole frame on twos, the

@@ -6,7 +6,7 @@
 # heading and a long reach give a narrow spire, and needles along every limb close it
 # up. It is also the tree that has looked like it was wavering since Van Gogh.
 #
-#   flint gen examples/specs/grove_cypress.procgen.toml --strip -o cypress.png
+#   flint gen specs/grove_cypress.procgen.toml --strip -o cypress.png
 
 generator = "tree_v1"
 

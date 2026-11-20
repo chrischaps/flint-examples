@@ -5,7 +5,7 @@
 # `[living] pose = "noise"` its arching limbs and hanging whips bend on smooth
 # noise instead, the tree they grew. The params are specs/weeping_willow's.
 #
-#   flint gen examples/specs/grove_willow.procgen.toml --strip -o willow.png
+#   flint gen specs/grove_willow.procgen.toml --strip -o willow.png
 
 generator = "tree_v1"
 

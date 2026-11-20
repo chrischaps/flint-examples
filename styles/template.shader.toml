@@ -7,9 +7,9 @@
 # draw it; save this file and its parameters change in place.
 #
 # Try it:
-#   flint render examples/user_styles.scene.toml --style template
-#   flint render examples/user_styles.scene.toml --sweep template.split=0,0.5,1
-#   flint edit examples/user_styles.scene.toml          (F4 -> Styles -> Template)
+#   flint render user_styles.scene.toml --style template
+#   flint render user_styles.scene.toml --sweep template.split=0,0.5,1
+#   flint edit user_styles.scene.toml          (F4 -> Styles -> Template)
 #
 # Or switch it on from a scene:
 #   [post_process.styles.template]
@@ -88,7 +88,7 @@ min = 0.0
 max = 200.0
 label = "Haze start (m)"
 
-# Strings and images (#413; examples/styles/darkroom.* uses them):
+# Strings and images (#413; styles/darkroom.* uses them):
 #
 # [options.finish]              # params.finish: a u32 index into choices,
 # default = "matte"             # with FLINT_FINISH_MATTE / FLINT_FINISH_GLOSS

@@ -1,6 +1,6 @@
 # Woozy Grove's birch: thin, pale and restless, the one that catches the light.
 #
-#   flint gen examples/specs/grove_birch.procgen.toml --strip -o birch.png
+#   flint gen specs/grove_birch.procgen.toml --strip -o birch.png
 
 generator = "tree_v1"
 

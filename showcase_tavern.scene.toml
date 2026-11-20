@@ -2,15 +2,15 @@
 #  SHOWCASE — The Rusty Flint Tavern, painted
 # ================================================================
 #
-#  The integration tavern's room (examples/prefabs/rusty_flint.prefab.toml,
-#  shared with examples/phase4_runtime.scene.toml) under a painterly Kuwahara
+#  The integration tavern's room (prefabs/rusty_flint.prefab.toml,
+#  shared with phase4_runtime.scene.toml) under a painterly Kuwahara
 #  pass, with a game around it: a pause menu and state machine
 #  (showcase_controller), a HUD (showcase_hud), a stranger who watches
 #  you and, once you've spoken to him, a strange wall beside the hearth
-#  that opens on examples/showcase_crucible.scene.toml.
+#  that opens on showcase_crucible.scene.toml.
 #
-#  Launch:  cargo run --bin flint -- play examples/showcase_tavern.scene.toml
-#  Look:    flint render examples/showcase_tavern.scene.toml -o showcase.png
+#  Launch:  flint play showcase_tavern.scene.toml
+#  Look:    flint render showcase_tavern.scene.toml -o showcase.png
 #           (the [camera] below looks across the room at the hearth and the wall)
 # ================================================================
 
@@ -18,8 +18,8 @@
 name = "The Rusty Flint Tavern — Showcase"
 version = "2.0"
 description = "The tavern, painted: pause menu, HUD, a watchful stranger and a hidden passage"
-# Escape and a pad's Start open the pause menu (examples/ui/pause.ui.toml)
-input_config = "examples/input_showcase.toml"
+# Escape and a pad's Start open the pause menu (ui/pause.ui.toml)
+input_config = "input_showcase.toml"
 
 # From beside the posts, across the room to the hearth; the strange wall
 # is the cold stone just right of it, the first moonlit window beyond.

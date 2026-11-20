@@ -1,18 +1,18 @@
 # Wooze props: what else gets the wooze (#252)
 
-The experiment pass after #251's shortlist (`docs/design/living-props-beyond-trees.md`),
-in epic #206. Grass was the first target (`examples/woozy_grove_grass/`, PR #259). This is
+The experiment pass after #251's shortlist (`engine/docs/design/living-props-beyond-trees.md`),
+in epic #206. Grass was the first target (`woozy_grove_grass/`, PR #259). This is
 the rest: a vine, a beetle and a noise pose. Each one is the cheapest version that
 could be judged, beside a still twin or the thing it would replace.
 
 ```sh
 cargo build --release --bin flint --bin flint-player
 cargo build --release -p flint-procgen --example living_spike
-python examples/wooze_props/experiment.py      # everything, about 20 minutes, into renders/wooze_props/
-cargo run --release --bin flint -- play examples/wooze_props.scene.toml
+python wooze_props/experiment.py      # everything, about 20 minutes, into renders/wooze_props/
+flint play wooze_props.scene.toml
 ```
 
-`experiment.py` renders `examples/wooze_props.scene.toml`'s variants with
+`experiment.py` renders `wooze_props.scene.toml`'s variants with
 `flint render --time 0..4 --fps 12`, plays the bob in `flint-player`, then runs
 `noise_pose.py`. No engine code changed. The prototype lives in the
 `living_spike` example and the rest is demo files: the existing scenes render
@@ -28,7 +28,7 @@ a 0.5 s step, so a beat is 6 frames.
 
 ## 1. The vine: `garden_vine` with a `[living]` table
 
-`examples/specs/grove_vine.procgen.toml` is the showcase vine with the grove oak's
+`specs/grove_vine.procgen.toml` is the showcase vine with the grove oak's
 `[living]` table and nothing else. On the left pillar it lives, and on the right it's
 the same lineage baked once.
 
@@ -56,7 +56,7 @@ generator that follows a surface, which is a procgen question and not a wooze on
 
 ## 2. The beetle: `shallow_wooze` on a creature
 
-`examples/specs/grove_beetle.procgen.toml` is `specs/beetle.procgen.toml` with a fixed
+`specs/grove_beetle.procgen.toml` is `specs/beetle.procgen.toml` with a fixed
 seed (`creature_v1` ignores it anyway: #251). The left beetle has
 `shallow_wooze { amplitude = 0.04, wavelength = 0.35 }` and the right one has none.
 
@@ -77,7 +77,7 @@ nudge.
 ### The bob
 
 The showcase creatures run `creature_idle.rhai`: a 3 cm bob and a sway, on the wall
-clock when this was first measured. `examples/scripts/beetle_idle.rhai` is the same motion. `experiment.py` plays both
+clock when this was first measured. `scripts/beetle_idle.rhai` is the same motion. `experiment.py` plays both
 beetles with it in `flint-player` (scripts don't run under `flint render`), from a
 camera low over them, and once without it as the control.
 
@@ -114,7 +114,7 @@ is 1.5 cm. Scenes with no table keep the wall clock.
 
 ## 3. The noise pose (prototype)
 
-`living_spike noise` (`crates/flint-procgen/examples/living_spike.rs`) is a
+`living_spike noise` (`engine/crates/flint-procgen/examples/living_spike.rs`) is a
 `LivingGenerator` of its own. Its structure is whatever `generate` bakes, from any
 branch method. A pose turns each rest segment by smooth 3D noise, sampled at the
 segment's midpoint and seeded by the shape seed: a bend with no twist (`--turn`
@@ -150,7 +150,7 @@ renders each frame with `flint edit <glb> --render` from one fixed camera.
   as the oak does.
 
 **Verdict: keep, as the way pine, willow and the other colonization and grammar
-trees live.** Follow-up: #506, a `[living]` noise pose in the engine, with a branch-order depth for colonization. Done: `[living] pose = "noise"`, and `living_spike noise` now drives the engine's own (the numbers above are the prototype's, from before branch order). `examples/noise_trees.scene.toml` puts the living pine and willow beside the oak. Creatures by noise pose stay parked: their body
+trees live.** Follow-up: #506, a `[living]` noise pose in the engine, with a branch-order depth for colonization. Done: `[living] pose = "noise"`, and `living_spike noise` now drives the engine's own (the numbers above are the prototype's, from before branch order). `noise_trees.scene.toml` puts the living pine and willow beside the oak. Creatures by noise pose stay parked: their body
 parts would have to ride as cards, and `SegmentPose` has no three-axis scale (#251).
 
 ## What to look at

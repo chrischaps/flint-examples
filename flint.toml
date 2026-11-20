@@ -1,0 +1,17 @@
+# Flint's examples: curated scenes that each show what one part of the engine
+# does. This file marks the project root; every flint command, the viewer and
+# the player read it from any folder here, so none needs --schemas.
+
+[project]
+id = "flint-examples"
+# The engine's components and archetypes, then the room-builder layer the
+# examples are written in (`furniture`, `wall`, `floor`, `ceiling`, `pillar`,
+# `room`, `door`). Both come from the engine subtree at engine/.
+schemas = ["engine/schemas", "engine/schemas/examples"]
+# What `flint play` opens when no scene is named: the Phase 4 tavern.
+scene = "phase4_runtime.scene.toml"
+
+# The collision layers the examples' colliders may name besides `default`
+# (#729): `collision_layers.scene.toml` sorts its balls with them.
+[project.physics]
+layers = ["glass", "ghost"]

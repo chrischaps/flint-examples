@@ -2,10 +2,10 @@
 # actions are the built-in keyboard ones; this only adds the controls,
 # which appear once a finger touches and hide when a key or pad is used.
 #
-#   cargo run --bin flint-player -- examples/phase4_runtime.scene.toml \
-#     --input-config examples/input_touch.toml
+#   flint-player phase4_runtime.scene.toml \
+#     --input-config input_touch.toml
 #   (add --touch-controls always to drive them with the mouse on a desktop,
-#    or --input-script examples/input_touch_walk.txt --frame-step 0.0333 for two
+#    or --input-script input_touch_walk.txt --frame-step 0.0333 for two
 #    scripted thumbs; its pixels assume a 1280x720 window at scale 1.5)
 
 version = 1

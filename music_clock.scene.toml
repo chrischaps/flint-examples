@@ -14,9 +14,9 @@
 #  flint render --scripts it is the game clock's, so a capture lands
 #  each beat on the same frame every run.
 #
-#  Stems:  python examples/tools/music_clock.py
-#  Play:   cargo run --bin flint -- play examples/music_clock.scene.toml
-#  Still:  cargo run --bin flint -- render examples/music_clock.scene.toml --scripts --time 8.4
+#  Stems:  python tools/music_clock.py
+#  Play:   flint play music_clock.scene.toml
+#  Still:  flint render music_clock.scene.toml --scripts --time 8.4
 # ================================================================
 
 [scene]
@@ -53,8 +53,8 @@ ambient_ground = [0.03, 0.03, 0.04]
 
 [entities.conductor]
 [entities.conductor.music_session]
-manifest = "examples/music/clock.suite.toml"
-events = "examples/music/clock.events.toml"
+manifest = "music/clock.suite.toml"
+events = "music/clock.events.toml"
 [entities.conductor.script]
 source = "music_clock.rhai"
 

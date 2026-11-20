@@ -6,7 +6,7 @@
 # it, so a hard line crossed the crown at the horizon. Now each translucent draw
 # is fogged at its own depth, and the crown reads as one tree across the edge.
 #
-#   cargo run --bin flint -- render examples/fog_veil.scene.toml --time 2 \
+#   flint render fog_veil.scene.toml --time 2 \
 #     --output fog_veil.png --width 1280 --height 720
 #
 # The echoes need a moment of the living clock to exist, hence `--time`.

@@ -4,7 +4,7 @@
 # mode. Each is a display style with named params now, and the tear is a
 # [post_process] key any style can follow:
 #
-#   cargo run --bin flint-player -- examples/reality_tears.scene.toml
+#   flint-player reality_tears.scene.toml
 #
 # scripts/reality_tears.rhai walks a 30-second loop: the code rains through
 # the tear's patches (matrix), the sea turns to blood (the blood style and
@@ -12,10 +12,10 @@
 # the frame rolls drunk, and a swell buries the eye (underwater). Each at
 # once from the command line:
 #
-#   flint render examples/reality_tears.scene.toml --style matrix:blend_source=tear --set post.tear=0.6
-#   flint render examples/reality_tears.scene.toml --style tron:blend_source=tear --set post.tear=0.5 --set post.tear_iris=true
-#   flint render examples/reality_tears.scene.toml --style underwater:depth=0.3
-#   flint render examples/reality_tears.scene.toml --scripts --time 9
+#   flint render reality_tears.scene.toml --style matrix:blend_source=tear --set post.tear=0.6
+#   flint render reality_tears.scene.toml --style tron:blend_source=tear --set post.tear=0.5 --set post.tear_iris=true
+#   flint render reality_tears.scene.toml --style underwater:depth=0.3
+#   flint render reality_tears.scene.toml --scripts --time 9
 #
 # `flint render --list-styles` lists their params; F4 > Styles tunes them.
 

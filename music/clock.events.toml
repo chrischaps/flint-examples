@@ -1,4 +1,4 @@
-# Bus changes on the musical grid for examples/music/clock.suite.toml (#745).
+# Bus changes on the musical grid for music/clock.suite.toml (#745).
 # Bars are counted from 1, as the console counts them.
 schema_version = 0
 

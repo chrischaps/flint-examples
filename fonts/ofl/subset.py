@@ -1,4 +1,4 @@
-"""Subset the downloaded OFL fonts into examples/fonts/ofl/<Family>/ (#935).
+"""Subset the downloaded OFL fonts into fonts/ofl/<Family>/ (#935).
 
 Usage: python -I -X utf8 subset.py <download dir> <out dir>
 

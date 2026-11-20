@@ -8,8 +8,8 @@
 # that share of each pixel back: the fire stays fire, the glass stays
 # glass, and the glyphs show through only as much as the glass lets them.
 #
-#   cargo run --bin flint -- render examples/style_veil.scene.toml --output veil.png --particle-time 2
-#   cargo run --bin flint -- render examples/style_veil.scene.toml --output mask.png --particle-time 2 --debug-mode style
+#   flint render style_veil.scene.toml --output veil.png --particle-time 2
+#   flint render style_veil.scene.toml --output mask.png --particle-time 2 --debug-mode style
 #
 # Without --particle-time the effect isn't stepped and draws no particles.
 

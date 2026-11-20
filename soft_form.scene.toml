@@ -3,16 +3,16 @@
 # turns away from the eye; its cards keep their edges, and nothing about how it
 # moves changes. 0 is a hard edge, drawn exactly as before.
 #
-#   cargo run --bin flint -- render examples/soft_form.scene.toml \
+#   flint render soft_form.scene.toml \
 #     --time 2 --sweep wooze.preset=hard,soft,softest -o soft.png
-#   cargo run --bin flint-player -- examples/soft_form.scene.toml
+#   flint-player soft_form.scene.toml
 #
-# The presets are examples/wooze/{hard,soft,softest}.wooze.toml. In the player, F3's
+# The presets are wooze/{hard,soft,softest}.wooze.toml. In the player, F3's
 # Living Props panel has it under Silhouette, and a script turns it with
 # `tune_living(#{ living: #{ softness: 0.6 } })`, or for one species with
 # `tune_living(#{ species: "soft_form", softness: 0.6 })`.
 #
-# The spec is examples/specs/soft_form.procgen.toml.
+# The spec is specs/soft_form.procgen.toml.
 
 [scene]
 name = "Soft Form"

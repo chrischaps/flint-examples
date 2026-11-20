@@ -18,7 +18,7 @@
 # Its `zoom` above 1 makes every cut a punch-in from the FOV alone, the view
 # that many times smaller, which the detector catches past 1.25x (#474).
 #
-#   cargo run --bin flint-player -- examples/ascii_cuts.scene.toml #     --frame-step 0.0166667 --screenshot out/cuts.png --screenshot-every 0.0166667 --exit-after 4
+#   flint-player ascii_cuts.scene.toml #     --frame-step 0.0166667 --screenshot out/cuts.png --screenshot-every 0.0166667 --exit-after 4
 
 [scene]
 name = "ASCII Cuts"

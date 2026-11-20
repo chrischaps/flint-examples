@@ -15,8 +15,8 @@
 #
 # The camera block frames it, so no camera flags are needed:
 #
-#   cargo run --bin flint -- render examples/ascii_lantern.scene.toml --output lantern.png --width 1280 --height 720
-#   cargo run --bin flint -- render examples/ascii_lantern.scene.toml \
+#   flint render ascii_lantern.scene.toml --output lantern.png --width 1280 --height 720
+#   flint render ascii_lantern.scene.toml \
 #     --sweep ascii.ramp=classic,blocks,minimal,detailed --output ramps.png
 
 [scene]

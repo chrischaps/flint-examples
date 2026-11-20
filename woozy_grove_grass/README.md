@@ -1,14 +1,14 @@
 # Woozy grass: the first target of #252's experiment pass
 
-The Woozy Grove (`examples/woozy_grove.scene.toml`, #217) grown over with a meadow whose
+The Woozy Grove (`woozy_grove.scene.toml`, #217) grown over with a meadow whose
 grass keeps the trees' time. It's the third target on #251's shortlist
-(`docs/design/living-props-beyond-trees.md`), tried first because it's the one
+(`engine/docs/design/living-props-beyond-trees.md`), tried first because it's the one
 everyone walks through.
 
 ```sh
 cargo build --release --bin flint
-python examples/woozy_grove_grass/experiment.py      # every variant, three places, ~5 minutes
-cargo run --release --bin flint -- play examples/woozy_grove_grass.scene.toml
+python woozy_grove_grass/experiment.py      # every variant, three places, ~5 minutes
+flint play woozy_grove_grass.scene.toml
 ```
 
 `make_mask.py` rebuilds `mask.png`, the grass's density: worn along the paths and

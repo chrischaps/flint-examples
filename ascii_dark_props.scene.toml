@@ -7,7 +7,7 @@
 #   barrel_normalized  normalize = 1: its own tones stretched over the ramp,
 #                      so the staves and hoops read again
 #
-#   cargo run --bin flint -- render examples/ascii_dark_props.scene.toml --output dark.png --no-grid
+#   flint render ascii_dark_props.scene.toml --output dark.png --no-grid
 
 [scene]
 name = "ASCII Dark Props"

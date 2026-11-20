@@ -5,8 +5,8 @@
 # blurred in two passes, one across and one down, and the last pass
 # screens it over the frame.
 #
-#   flint render examples/user_styles.scene.toml --style orton --output orton.png
-#   flint render examples/user_styles.scene.toml --style orton --gpu-time 120
+#   flint render user_styles.scene.toml --style orton --output orton.png
+#   flint render user_styles.scene.toml --style orton --gpu-time 120
 #       (each target's size and bytes are listed after the pass times)
 #
 # Each pass is a WGSL `fn style` of its own. A pass writes the target it

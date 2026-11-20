@@ -2,10 +2,10 @@
 
     cargo build --release --bin flint --bin flint-player
     cargo build --release -p flint-procgen --example living_spike
-    python examples/wooze_props/experiment.py               # all of it, about 20 minutes
-    python examples/wooze_props/experiment.py --only beetle # the variants whose name starts so
+    python wooze_props/experiment.py               # all of it, about 20 minutes
+    python wooze_props/experiment.py --only beetle # the variants whose name starts so
 
-For each variant of examples/wooze_props.scene.toml it writes a 4-second GIF from the
+For each variant of wooze_props.scene.toml it writes a 4-second GIF from the
 scene's camera and one low over the beetles to renders/wooze_props/, and prints how
 each target moves: of the frame pairs at 12 fps, how many change in a crop around
 it, and by how much. Each target stands beside a still twin, whose crop is the
@@ -143,7 +143,7 @@ def motion(gif: Path, crops: dict) -> dict:
 # The bob (#251's question): the showcase creatures' idle bobs and sways, on the wall
 # clock until #505 and on the wooze field's beat since. Scripts don't run under flint render, so this one plays in flint-player, one
 # frame per 1/12 s of game time, from a camera low over the beetles (no player, so
-# the scene's [camera] is the view). Both beetles run examples/scripts/beetle_idle.rhai;
+# the scene's [camera] is the view). Both beetles run scripts/beetle_idle.rhai;
 # the left one (on screen too) also has shallow wooze. A run without the scripts is
 # the control.
 BOB_CAMERA = {"position": "[0.0, 0.95, -2.0]", "target": "[0.0, 0.3, 0.4]"}

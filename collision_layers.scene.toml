@@ -15,7 +15,7 @@
 #  The layers are the checkout's, in the root flint.toml:
 #    [project.physics] layers = ["glass", "ghost"]
 #
-#  Check:  flint-player examples/collision_layers.scene.toml \
+#  Check:  flint-player collision_layers.scene.toml \
 #            --frame-step 0.0166667 --screenshot a.png --screenshot-at 5
 # ================================================================
 

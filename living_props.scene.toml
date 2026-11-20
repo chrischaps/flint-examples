@@ -2,7 +2,7 @@
 # own bone buffer and its own ring of poses kept full ahead of its clock, drifting
 # between them on the warped clock with its leaves boiling.
 #
-#   cargo run --release -p flint-player -- examples/living_props.scene.toml --exit-after 60
+#   cargo run --release -p flint-player -- living_props.scene.toml --exit-after 60
 #
 # prints `[living]` lines saying whether the rings stayed full and within the
 # procgen frame budget, and what blending cost. To turn the dial, add a table:
@@ -14,9 +14,9 @@
 #   shadows = "drift"      # a slower shadow, with no stagger or jitter
 #   echoes = { count = 0 } # no faint copies; also takes spread and alpha
 #
-# examples/wooze_field.scene.toml does more with [wooze].
+# wooze_field.scene.toml does more with [wooze].
 #
-# The spec is specs/examples/oak_living.procgen.toml; an
+# The spec is engine/specs/examples/oak_living.procgen.toml; an
 # entity's `lineage_seed` says which tree it is, and its name which way it moves.
 
 [scene]

@@ -2,10 +2,10 @@
 
     cargo build --release --bin flint
     cargo build --release -p flint-procgen --example living_spike
-    python examples/wooze_props/noise_pose.py              # every variant, about 10 minutes
-    python examples/wooze_props/noise_pose.py --only pine  # the variants whose name starts so
+    python wooze_props/noise_pose.py              # every variant, about 10 minutes
+    python wooze_props/noise_pose.py --only pine  # the variants whose name starts so
 
-`living_spike noise` (crates/flint-procgen/examples/living_spike.rs) poses a tree by
+`living_spike noise` (engine/crates/flint-procgen/examples/living_spike.rs) poses a tree by
 turning each rest segment with smooth 3D noise instead of regrowing it, through the
 engine's own PoseStream, variance and blending. It writes a GLB per frame and four
 held poses; this renders each with `flint edit <glb> --render` from one fixed camera
@@ -34,8 +34,8 @@ EXE = ".exe" if sys.platform == "win32" else ""
 FLINT = ROOT / "target" / "release" / f"flint{EXE}"
 SPIKE = ROOT / "target" / "release" / "examples" / f"living_spike{EXE}"
 
-PINE = "specs/examples/pine_tree.procgen.toml"
-OAK = "examples/specs/grove_oak.procgen.toml"
+PINE = "engine/specs/examples/pine_tree.procgen.toml"
+OAK = "specs/grove_oak.procgen.toml"
 WILLOW = "specs/weeping_willow.procgen.toml"
 
 # name -> (spec, lineage, living_spike flags, what it is)

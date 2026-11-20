@@ -1,8 +1,8 @@
 # The Rusty Flint's stone: rough river fieldstone in lime mortar, for the
 # wainscot under the plaster and the great hearth. Warmer and browner than
-# specs/examples/stone_wall, the way stone looks by firelight.
+# engine/specs/examples/stone_wall, the way stone looks by firelight.
 #
-#   flint gen examples/specs/tavern_fieldstone.procgen.toml -o examples/textures/tavern/tavern_fieldstone.png
+#   flint gen specs/tavern_fieldstone.procgen.toml -o textures/tavern/tavern_fieldstone.png
 
 generator = "texture_v1"
 

@@ -12,8 +12,8 @@
 #  The grid is baked from the static colliders (ground, hedges, terrace,
 #  ramp, lantern posts) a tile at a time, as the first paths reach them.
 #
-#  Play:      cargo run --bin flint -- play examples/nav_lamplighter.scene.toml
-#  Playtest:  cargo run --bin flint -- playtest examples/nav_lamplighter.scene.toml --exit-after 60
+#  Play:      flint play nav_lamplighter.scene.toml
+#  Playtest:  flint playtest nav_lamplighter.scene.toml --exit-after 60
 #             (the script calls test_pass once the fourth lantern is lit)
 # ================================================================
 

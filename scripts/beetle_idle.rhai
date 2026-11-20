@@ -1,5 +1,5 @@
 // ─── beetle_idle.rhai ─────────────────────────────────────
-// The showcase creatures' idle (showcase_game/scripts/creature_idle.rhai) for the
+// The showcase creatures' idle (engine/showcase_game/scripts/creature_idle.rhai) for the
 // wooze props experiment (#252): a bob and a sway. On the wall clock they fought
 // shallow wooze's held beat; on the wooze field's clock (#505) they hold with it.
 //

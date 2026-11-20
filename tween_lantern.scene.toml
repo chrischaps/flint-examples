@@ -9,9 +9,9 @@
 #
 # On game time, so a capture is the same every run:
 #
-#   flint render examples/tween_lantern.scene.toml --scripts --time 0 --no-grid -o dusk.png
-#   flint render examples/tween_lantern.scene.toml --scripts --time 3 --no-grid -o lit.png
-#   flint play examples/tween_lantern.scene.toml
+#   flint render tween_lantern.scene.toml --scripts --time 0 --no-grid -o dusk.png
+#   flint render tween_lantern.scene.toml --scripts --time 3 --no-grid -o lit.png
+#   flint play tween_lantern.scene.toml
 
 [scene]
 name = "Tween Lantern"

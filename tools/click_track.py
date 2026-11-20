@@ -1,11 +1,11 @@
-"""The click track for examples/audio_clock.scene.toml (#658).
+"""The click track for audio_clock.scene.toml (#658).
 
 A two-second loop at 120 bpm, four beats of 24000 frames at 48 kHz: a high
 click on the one, lower ones on two to four. Each click is a short sine
 burst with a fast decay, so where it lands is easy to hear against a pad
-lighting up. Deterministic; writes examples/audio/click_120.wav.
+lighting up. Deterministic; writes audio/click_120.wav.
 
-    python examples/tools/click_track.py
+    python tools/click_track.py
 """
 
 import math

@@ -9,18 +9,18 @@
 # is 24 frames a second, and `boil_on = 2` holds each drawing for two of them: 12 a
 # second, as the `linklater` preset gets from a half second on ones.
 #
-#   cargo run --release -p flint-player -- examples/shading_boil.scene.toml
+#   cargo run --release -p flint-player -- shading_boil.scene.toml
 #
 # F4, Contour and Shading boil, has every knob. To check the cadence, capture at
 # one film frame per frame. Consecutive pairs come out byte for byte the same, and
 # each pair differs from the next:
 #
-#   cargo run --release -p flint-player -- examples/shading_boil.scene.toml \
+#   cargo run --release -p flint-player -- shading_boil.scene.toml \
 #     --frame-step 0.0416666666666667 --screenshot-every 0.0416666666666667 --exit-after 12
 #
 # Headless, a drawing at a time:
 #
-#   cargo run --release --bin flint -- render examples/shading_boil.scene.toml \
+#   flint render shading_boil.scene.toml \
 #     --output renders/boil.png --boil-time 0.5
 
 [scene]

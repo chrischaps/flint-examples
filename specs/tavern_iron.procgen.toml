@@ -2,7 +2,7 @@
 # hammer pits, for barrel hoops, hinges, the chandelier and the firedogs.
 # Models give it metallic = 1; this is the colour, relief and roughness.
 #
-#   flint gen examples/specs/tavern_iron.procgen.toml -o examples/textures/tavern/tavern_iron.png
+#   flint gen specs/tavern_iron.procgen.toml -o textures/tavern/tavern_iron.png
 
 generator = "texture_v1"
 

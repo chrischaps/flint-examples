@@ -3,8 +3,8 @@
 # being set. A word slides out under the right margin and back in under the
 # left, a line's width and a word later, and every line keeps its own pace.
 #
-#   flint render examples/drifting_page.scene.toml --time 0..8 -o page.gif
-#   flint render examples/drifting_page.scene.toml --scripts --time 0..12 -o speaking.gif
+#   flint render drifting_page.scene.toml --time 0..8 -o page.gif
+#   flint render drifting_page.scene.toml --scripts --time 0..12 -o speaking.gif
 #
 # `row_pace` is metres a second along the lines (0 holds them where they were
 # written, and every spec before #576 is that); `row_pace_spread` is how far

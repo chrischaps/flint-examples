@@ -1,5 +1,5 @@
 // ─── drifting_page.rhai ──────────────────────────────────
-// A voice through the page's rows (examples/drifting_page.scene.toml, #576):
+// A voice through the page's rows (drifting_page.scene.toml, #576):
 // phrases that quicken the drift, pauses that all but hold it. The script only
 // sets a rate; the engine owns the motion, so no word jumps when the rate
 // changes, it only goes on faster or slower from where it is.

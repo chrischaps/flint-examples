@@ -1,10 +1,10 @@
 # The Rusty Flint's floor: wide, old oak boards, darkened by a century of
 # spilled ale and boots, lighter where the grain is open.
 #
-#   flint gen examples/specs/tavern_floor.procgen.toml -o examples/textures/tavern/tavern_floor.png
+#   flint gen specs/tavern_floor.procgen.toml -o textures/tavern/tavern_floor.png
 #     -> tavern_floor_color.png, _normal.png, _roughness.png
 #
-# examples/tools/tavern_models.py lays it 2.4 m to a tile across the floor and
+# tools/tavern_models.py lays it 2.4 m to a tile across the floor and
 # shares it with the tabletops, the bar top and the doors.
 
 generator = "texture_v1"

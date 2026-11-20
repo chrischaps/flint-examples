@@ -1,13 +1,13 @@
 # Trees that live by noise (#506): a pine and a willow beside the grove's oak.
 #
-#   flint render examples/noise_trees.scene.toml --time 0..4 --fps 12 --output noise_trees.gif
-#   flint play examples/noise_trees.scene.toml
+#   flint render noise_trees.scene.toml --time 0..4 --fps 12 --output noise_trees.gif
+#   flint play noise_trees.scene.toml
 #
 # The oak on the left regrows each pose from its shape seed, as every grove tree
 # did until now. The pine in the middle grows by space colonization and the
 # willow on the right from a text grammar, and neither can regrow: each seed
 # grows them a different tree. With `[living] pose = "noise"` in their specs
-# (examples/specs/grove_{pine,willow}.procgen.toml) they keep their own branches
+# (specs/grove_{pine,willow}.procgen.toml) they keep their own branches
 # and bend them on smooth noise, so their outlines hold while their limbs drift.
 # All three share the clearing's field, light and paint, and one phase offset,
 # so they hold and glide on the same beats.

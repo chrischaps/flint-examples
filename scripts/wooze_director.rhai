@@ -1,5 +1,5 @@
 // ─── wooze_director.rhai ─────────────────────────────────
-// Directs examples/wooze_field.scene.toml: a script moving how woozy the world is.
+// Directs wooze_field.scene.toml: a script moving how woozy the world is.
 //
 // Nothing here touches a tree. The field is the one thing that changes, and every
 // prop reads it: the new step bends each clock from wherever it stands, and each

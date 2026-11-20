@@ -7,8 +7,8 @@
 # above it. There is no sun, so nothing floods the floor and the pool of
 # light keeps its edge.
 #
-#   flint render examples/spot_shadow.scene.toml -o spot_shadow.png
-#   flint play examples/spot_shadow.scene.toml
+#   flint render spot_shadow.scene.toml -o spot_shadow.png
+#   flint play spot_shadow.scene.toml
 
 [scene]
 name = "Spot Shadow"

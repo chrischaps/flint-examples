@@ -1,15 +1,15 @@
 # Stylize props: a small clearing of styled props, framed close: the
-# quickest place to try a style. It is examples/style_mask.scene.toml's
+# quickest place to try a style. It is style_mask.scene.toml's
 # idea without its grass and its two heavy glTFs (the 32 MB bench and the
 # 9.5 MB lantern), so it loads in a few seconds, and the props fill enough
 # of the frame that a per-entity style's glyphs read.
 #
-#   cargo run --bin flint -- render examples/stylize_props.scene.toml --style ascii --output props.png
+#   flint render stylize_props.scene.toml --style ascii --output props.png
 #
 # Two styles side by side. The clearing itself is
-# examples/prefabs/stylize_props.prefab.toml. The stylize goldens render a
+# prefabs/stylize_props.prefab.toml. The stylize goldens render a
 # frozen copy of this scene and its one-style siblings from
-# tests/fixtures/scenes/ (#386, #763), so change this one freely.
+# engine/tests/fixtures/scenes/ (#386, #763), so change this one freely.
 #
 # Styles:
 #   barrel, ybot      "ascii"   a static glTF mesh and a skinned one

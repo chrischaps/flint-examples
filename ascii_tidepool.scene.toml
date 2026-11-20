@@ -1,15 +1,15 @@
 # ASCII Tidepool: a scene to tune a palette and a glyph set in (#323).
 #
 # The lantern set piece (ascii_lantern.scene.toml, #316) drawn through the
-# `tidepool` palette (examples/palettes/tidepool.palette.toml) and the `tidepool`
-# glyph set (examples/fonts/tidepool.glyphs.toml). Both hot-reload: open it with
+# `tidepool` palette (palettes/tidepool.palette.toml) and the `tidepool`
+# glyph set (fonts/tidepool.glyphs.toml). Both hot-reload: open it with
 #
-#   cargo run --bin flint -- edit examples/ascii_tidepool.scene.toml
+#   flint edit ascii_tidepool.scene.toml
 #
 # then change an ink in the palette or a ramp in the glyph set and save; the
 # frame recolours or redraws within a second. A still:
 #
-#   cargo run --bin flint -- render examples/ascii_tidepool.scene.toml --output tidepool.png --width 1280 --height 720
+#   flint render ascii_tidepool.scene.toml --output tidepool.png --width 1280 --height 720
 
 [scene]
 name = "ASCII Tidepool"

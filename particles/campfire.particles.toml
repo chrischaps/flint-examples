@@ -5,7 +5,7 @@
 #   [entities.fire.particle_effect]
 #   effect = "campfire"
 #
-# Open it in the editor with `flint edit examples/particles/campfire.particles.toml`
+# Open it in the editor with `flint edit particles/campfire.particles.toml`
 # or snapshot it headlessly with `--render out.png --anim-time 1.5`.
 
 name = "campfire"

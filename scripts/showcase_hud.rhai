@@ -13,7 +13,7 @@ fn on_init() {
     let scene = get_current_scene();
     if scene == "" {
         scene_title = "THE RUSTY FLINT";
-    } else if scene == "examples/showcase_crucible.scene.toml" {
+    } else if scene == "showcase_crucible.scene.toml" {
         scene_title = "THE CRUCIBLE";
     } else {
         scene_title = "THE RUSTY FLINT";
@@ -64,7 +64,7 @@ fn on_update() {
             entered = true;
             // Re-read scene title for destination
             let scene = get_current_scene();
-            if scene == "examples/showcase_crucible.scene.toml" {
+            if scene == "showcase_crucible.scene.toml" {
                 scene_title = "THE CRUCIBLE";
             } else {
                 scene_title = "THE RUSTY FLINT";

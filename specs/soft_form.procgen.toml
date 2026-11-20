@@ -1,9 +1,9 @@
 # A pale form on a dusk ground, for judging its silhouette's softness (#582).
 #
-#   flint render examples/soft_form.scene.toml --time 2 \
+#   flint render soft_form.scene.toml --time 2 \
 #     --sweep wooze.preset=hard,soft,softest -o soft.png
 #
-# The held flame of specs/examples/form_living.procgen.toml, lit pale against a
+# The held flame of engine/specs/examples/form_living.procgen.toml, lit pale against a
 # dark ground with fewer cards and no echoes, so what changes between the
 # columns is only the body's outline. `softness` is a run-time knob: this spec
 # leaves it at 0, a hard edge, and the scene's presets turn it.

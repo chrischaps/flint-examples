@@ -1,22 +1,22 @@
 # Woozy Grove, with a meadow (#252): the grove of #217 grown over with grass that
-# keeps the trees' time. Everything but the meadow is examples/woozy_grove.scene.toml,
+# keeps the trees' time. Everything but the meadow is woozy_grove.scene.toml,
 # copied, so the two can be flipped between by eye.
 #
-#   cargo run --release --bin flint -- play examples/woozy_grove_grass.scene.toml
+#   flint play woozy_grove_grass.scene.toml
 #
 # The grass has `"grass.wooze" = true`, so instead of swaying on the wall clock it
 # holds and glides on the [wooze] field's beat, read where you stand, and each beat
 # its tips are combed by the same world-space noise that moves the bench (shallow
 # wooze, #215). Walk into the hush and the meadow slows with the cypress; the
 # shiver snaps it with the thorns. The mask is worn along the paths and round the
-# bench, and thin under every tree (examples/woozy_grove_grass/make_mask.py).
+# bench, and thin under every tree (woozy_grove_grass/make_mask.py).
 #
 # The comparisons the issue asks for, all from the north path:
 #
-#   flint render examples/woozy_grove_grass.scene.toml --time 0..4 --fps 12 -o grass.gif
-#   flint render examples/woozy_grove_grass.scene.toml --time 3.5 #     --sweep wooze.glide=0,0.4,1 -o glide.png
+#   flint render woozy_grove_grass.scene.toml --time 0..4 --fps 12 -o grass.gif
+#   flint render woozy_grove_grass.scene.toml --time 3.5 #     --sweep wooze.glide=0,0.4,1 -o glide.png
 #
-# examples/woozy_grove_grass/README.md lists the variants tried and what to look at.
+# woozy_grove_grass/README.md lists the variants tried and what to look at.
 
 [scene]
 name = "Woozy Grove, with a meadow"

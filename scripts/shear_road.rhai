@@ -3,7 +3,7 @@
 // the last tile's far edge. One entity and two calls a tile; the children
 // (road, curbs, lane line) follow through their parent's matrix.
 //
-// At time 0 this is exactly the road examples/tools/shear_road.py wrote; then
+// At time 0 this is exactly the road tools/shear_road.py wrote; then
 // the bend breathes from right to left and back. 22 tiles of 8 m (Rhai
 // functions can't see top-level constants, so the numbers are inline).
 

@@ -1,8 +1,8 @@
 # ASCII Edges (#267): a sphere and a box under the full-screen ASCII style,
 # with line glyphs along their edges.
 #
-#   cargo run --bin flint -- render examples/ascii_edges.scene.toml --output edges.png
-#   cargo run --bin flint -- render examples/ascii_edges.scene.toml --set ascii.edges=0 --output tone.png
+#   flint render ascii_edges.scene.toml --output edges.png
+#   flint render ascii_edges.scene.toml --set ascii.edges=0 --output tone.png
 #
 # Luminance alone loses a silhouette wherever an object is as bright as
 # what's behind it; edges come from geometry instead (depth, normals
@@ -15,7 +15,7 @@
 #
 # Edge ink (#351): the outlines in an ink of their own, against a tone fill
 # in another (amber lines over a green phosphor fill):
-#   cargo run --bin flint -- render examples/ascii_edges.scene.toml --no-grid #     --style ascii:color=tint,edge_ink=color,edge_color=#ffb347 --output ink.png
+#   flint render ascii_edges.scene.toml --no-grid #     --style ascii:color=tint,edge_ink=color,edge_color=#ffb347 --output ink.png
 # or in the table below: color = "tint", edge_ink = "color", edge_color = "#ffb347".
 # edge_ink = "hue" draws each line in its near side's own colour instead.
 

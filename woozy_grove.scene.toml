@@ -1,6 +1,6 @@
 # Woozy Grove (#217): a clearing to walk through, where the look gets judged by eye.
 #
-#   cargo run --release --bin flint -- play examples/woozy_grove.scene.toml
+#   flint play woozy_grove.scene.toml
 #
 # WASD and the mouse. You start at the north edge, looking in (a character always
 # starts facing +Z, which is why the grove is laid out this way round). The bench and
@@ -22,11 +22,11 @@
 # find (#219): half the drift on a half-second step, and `boil_on = 1` below, so the
 # paint and ink redraw 12 times a second. The book's Living Props chapter has why.
 #
-#   flint render examples/woozy_grove.scene.toml --time 3.5 --output grove.png
-#   flint render examples/woozy_grove.scene.toml --time 3.5 --sweep wooze.glide=0,0.3,1
-#   flint-player examples/woozy_grove.scene.toml --exit-after 60
+#   flint render woozy_grove.scene.toml --time 3.5 --output grove.png
+#   flint render woozy_grove.scene.toml --time 3.5 --sweep wooze.glide=0,0.3,1
+#   flint-player woozy_grove.scene.toml --exit-after 60
 #
-# The species are examples/specs/grove_*.procgen.toml: an oak, a cypress, a birch and a
+# The species are specs/grove_*.procgen.toml: an oak, a cypress, a birch and a
 # gnarled thorn, all from the built-in L-system and none with [[lod]] (#193). Each
 # trunk has a solid sibling, not a collider of its own, since physics assumes unit
 # scale and these trees are scaled. Trunks hold still, so they can be solid. Limbs

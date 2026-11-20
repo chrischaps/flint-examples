@@ -3,7 +3,7 @@
 # broad strokes that the Kuwahara pass can paint over. Nothing at grass-blade scale
 # for the eye to catch standing still next to a tree that isn't.
 #
-#   flint gen examples/specs/grove_floor.procgen.toml -o floor.png
+#   flint gen specs/grove_floor.procgen.toml -o floor.png
 #
 # It covers the ground once, without tiling: pipeline noise doesn't tile yet (#172).
 

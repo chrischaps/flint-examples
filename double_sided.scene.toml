@@ -10,8 +10,8 @@
 #  shadows from both; the right palm's are culled, as glTF says a
 #  single-sided material's back faces are.
 #
-#  Models: python tools/test-models/double_sided_palm.py
-#  Render: cargo run --bin flint -- render examples/double_sided.scene.toml \
+#  Models: python engine/tools/test-models/double_sided_palm.py
+#  Render: flint render double_sided.scene.toml \
 #            --output renders/double_sided.png
 # ================================================================
 

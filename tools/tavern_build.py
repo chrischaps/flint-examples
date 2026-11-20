@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """Builds the Rusty Flint Tavern's models and textures (#295).
 
-Everything the two tavern scenes draw (examples/phase4_runtime.scene.toml and
-examples/showcase_tavern.scene.toml) is made here, from code, so an agent can
+Everything the two tavern scenes draw (phase4_runtime.scene.toml and
+showcase_tavern.scene.toml) is made here, from code, so an agent can
 change a table's height or a window's width and rebuild:
 
-    python examples/tools/tavern_build.py --textures   # flint gen the five specs, then models
-    python examples/tools/tavern_build.py              # models only (textures already built)
+    python tools/tavern_build.py --textures   # flint gen the five specs, then models
+    python tools/tavern_build.py              # models only (textures already built)
 
-Textures: examples/specs/tavern_{floor,timber,fieldstone,plaster,iron}.procgen.toml
+Textures: specs/tavern_{floor,timber,fieldstone,plaster,iron}.procgen.toml
 go through `flint gen` (target/release/flint, or --flint PATH) and land as
-JPEGs in examples/textures/tavern/: <name>_color.jpg, <name>_normal.jpg and
+JPEGs in textures/tavern/: <name>_color.jpg, <name>_normal.jpg and
 <name>_mr.jpg (glTF metallic-roughness: G roughness, B metal).
 
-Models: examples/models/tavern_*.glb, binary glTF whose images are those JPEGs by
+Models: models/tavern_*.glb, binary glTF whose images are those JPEGs by
 relative URI (../textures/tavern/...), so seven models share one copy of each.
 Every model is in metres with +Y up; the room's own pieces (shell, hearth) are
 in the main hall's coordinates, so their entities sit at the origin, and each
@@ -984,7 +984,7 @@ def build_door() -> Mesh:
 # ─── glTF ───────────────────────────────────────────────────────────────────
 
 def write_glb(mesh: Mesh, path: Path, name: str):
-    gltf = {"asset": {"version": "2.0", "generator": "flint examples/tools/tavern_build.py"},
+    gltf = {"asset": {"version": "2.0", "generator": "flint tools/tavern_build.py"},
             "scene": 0, "scenes": [{"nodes": [0]}],
             "nodes": [{"name": name, "mesh": 0}],
             "meshes": [{"name": name, "primitives": []}],

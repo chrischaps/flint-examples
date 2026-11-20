@@ -4,8 +4,8 @@
 #
 #   tween_post_style_param("pencil", "reveal", 1.0, 4.0, "ease_in_out");
 #
-#   cargo run --bin flint-player -- examples/reveal_tear.scene.toml
-#   cargo run --bin flint -- render examples/reveal_tear.scene.toml --scripts --time 3 --output torn.png
+#   flint-player reveal_tear.scene.toml
+#   flint render reveal_tear.scene.toml --scripts --time 3 --output torn.png
 #
 #   0 s  live: the clearing, the pencil style at reveal 0
 #   1 s  the tear opens from just right of centre and grows for 4 s

@@ -28,5 +28,5 @@ fn on_interact() {
     log("[The wall grinds open, revealing a passage descending into darkness...]");
     play_sound("audio/door_open.ogg");
 
-    load_scene("examples/showcase_crucible.scene.toml");
+    load_scene("showcase_crucible.scene.toml");
 }

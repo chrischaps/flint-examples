@@ -3,7 +3,7 @@
 # once it has gone by they are themselves again (#859). Nothing else in the
 # frame changes: the grass, the ground and the sky stay as they are.
 #
-#   cargo run --bin flint-player -- examples/ascii_shockwave.scene.toml
+#   flint-player ascii_shockwave.scene.toml
 #
 # Each prop's ascii_style has `blend_source = "field"`: its blend is
 # multiplied by the style field at each pixel, a screen field the game
@@ -13,12 +13,12 @@
 # right button for a flashlight (`field_cone`) from the bottom of the
 # screen.
 #
-#   flint render examples/ascii_shockwave.scene.toml --scripts --time 1.4
-#   flint render examples/ascii_shockwave.scene.toml --scripts --time 0..12 -o waves.gif
+#   flint render ascii_shockwave.scene.toml --scripts --time 1.4
+#   flint render ascii_shockwave.scene.toml --scripts --time 0..12 -o waves.gif
 #
 # With no field filled a prop following it is at blend 0: its style is off,
 # pass and mask skipped. The tear is the same idea with a field of its own
-# (`blend_source = "tear"`, examples/ascii_tear.scene.toml).
+# (`blend_source = "tear"`, ascii_tear.scene.toml).
 
 [scene]
 name = "ASCII Shockwave"

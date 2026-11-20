@@ -51,7 +51,7 @@ fn on_interact() {
     let me = self_entity();
     play_sound("audio/npc_greeting.wav");
 
-    // What a playtest can read (examples/playtests/phase4_runtime.playtest.txt):
+    // What a playtest can read (playtests/phase4_runtime.playtest.txt):
     // played, these say nothing unless the assertion fails
     test_assert(distance(me, get_entity("player")) <= 3.5, "the bartender only talks within reach");
 

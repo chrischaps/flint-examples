@@ -10,8 +10,8 @@
 # black it is many levels: compare the three, at a strength that shows each
 # pattern, and at one step, where styles 1 and 2 show none:
 #
-#   flint render examples/dark_stage.scene.toml --no-grid --sweep post.dither_style=0,1,2
-#   flint render examples/dark_stage.scene.toml --no-grid --sweep post.dither_enabled=false,true
+#   flint render dark_stage.scene.toml --no-grid --sweep post.dither_style=0,1,2
+#   flint render dark_stage.scene.toml --no-grid --sweep post.dither_enabled=false,true
 
 [scene]
 name = "Dark Stage"

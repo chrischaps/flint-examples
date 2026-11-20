@@ -4,11 +4,11 @@
 # seed, so it can't regrow a pose the way the grove's oak does. With
 # `[living] pose = "noise"` it keeps its own branches and bends them instead:
 # each pose turns every segment by smooth noise, so the crown keeps its
-# outline while its limbs drift. The params are specs/examples/pine_tree's,
+# outline while its limbs drift. The params are engine/specs/examples/pine_tree's,
 # without its [[lod]]: a skinned rest is one level.
 #
-#   flint gen examples/specs/grove_pine.procgen.toml --strip -o pine.png
-#   flint render examples/noise_trees.scene.toml --time 0..4 --output pine.gif
+#   flint gen specs/grove_pine.procgen.toml --strip -o pine.png
+#   flint render noise_trees.scene.toml --time 0..4 --output pine.gif
 
 generator = "tree_v1"
 

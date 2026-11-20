@@ -8,7 +8,7 @@
 #  acknowledges how many sparks you've collected from the tavern.
 #
 #  Reached via: hidden passage in the tavern (scene transition)
-#  Or directly: cargo run --bin flint-player -- examples/showcase_crucible.scene.toml
+#  Or directly: flint-player showcase_crucible.scene.toml
 #
 #  Controls: same as tavern scene
 # ================================================================
@@ -17,7 +17,7 @@
 name = "The Forge Between Worlds — The Crucible"
 version = "1.0"
 description = "Showcase: underground forge with heavy post-processing, particles, persistent store, and forge spirit NPC"
-input_config = "examples/input_showcase.toml"
+input_config = "input_showcase.toml"
 
 
 # ============================================================

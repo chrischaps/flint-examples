@@ -1,12 +1,12 @@
 # Living Props side by side (#246): pairs of one tree under two settings.
 #
-#   flint render examples/living_compare.scene.toml --time 3.5 --output compare.png
-#   flint render examples/living_compare.scene.toml --time 3.5 --report json --output compare.png
-#   flint play examples/living_compare.scene.toml
+#   flint render living_compare.scene.toml --time 3.5 --output compare.png
+#   flint render living_compare.scene.toml --time 3.5 --report json --output compare.png
+#   flint play living_compare.scene.toml
 #
 # Different species are different trees, so a fair pair isn't an oak beside a thorn.
 # It's one spec beside a copy of itself under a new meta.name
-# (examples/specs/grove_*_twin.procgen.toml): a species of its own, with the same lineage
+# (specs/grove_*_twin.procgen.toml): a species of its own, with the same lineage
 # seed, so it grows the same skeleton. Each pair also shares a phase offset, so both
 # trees hold and glide on the same beats, and the twin gets its own values in
 # [living.species.<twin>] below. Everything else is the clearing's: one field, one

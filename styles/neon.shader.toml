@@ -5,8 +5,8 @@
 # reads the scene under the style: the lines go flat and the halo sits
 # where the original bright pixels were.
 #
-#   flint render examples/neon_bloom.scene.toml --output neon.png
-#   flint render examples/neon_bloom.scene.toml --style neon:feeds_bloom=0
+#   flint render neon_bloom.scene.toml --output neon.png
+#   flint render neon_bloom.scene.toml --style neon:feeds_bloom=0
 #
 # A scene overrides the choice with `feeds_bloom` in its
 # [post_process.styles.neon] table; F4 -> Styles -> Neon has the checkbox.

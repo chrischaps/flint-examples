@@ -1,22 +1,24 @@
 # Flint's demo scenes as a web game (#106):
 #
-#   flint export web examples/                 # examples/dist/web, then serve it
-#   python -m http.server -d examples/dist/web # http://localhost:8000/
+#   flint export web .                # dist/web, then serve it
+#   python -m http.server -d dist/web # http://localhost:8000/
 #
 # It starts in the Phase 4 tavern; any other packed scene plays with
 # ?scene=<file>, e.g. ?scene=pencil_sketch.scene.toml. Format and keys:
-# crates/flint-cli/src/commands/bundle.rs.
+# engine/crates/flint-cli/src/commands/bundle.rs.
 
 name = "demo"
 scene = "phase4_runtime.scene.toml"
-# The engine's set (mounted below), then the room-builder layer the examples
-# are written in: `furniture`, `wall`, `door`... (#681). Named here because
-# the repository's flint.toml spells them from the repository root.
+# The engine's set, then the room-builder layer the examples are written in:
+# `furniture`, `wall`, `door`... (#681), both from the engine subtree, as
+# flint.toml names them.
 schemas = ["engine/schemas", "engine/schemas/examples"]
 
 exclude = [
-    # scenes that play only from the repo root, naming models or scenes by
-    # paths outside examples/ (or models nobody committed)
+    # scenes that played only from the engine repository's root while the
+    # examples lived in it, naming models or scenes by paths outside their
+    # folder (or models nobody committed). That root is this one now
+    # (#984); whether each packs here is untried, so they stay out
     "collision_2d_test/**",
     "scrolling_test/**",
     "ui_test/**",
@@ -38,11 +40,9 @@ exclude = [
     # still no scene reads
     "film/**",
     "luminarium_preview.png",
+    # the scripts that make the examples' assets and the film rig
+    "tools/**",
 ]
-
-# examples/ has no engine subtree: its schemas are the repo's.
-[mount]
-"engine/schemas" = "../schemas"
 
 [web]
 title = "Flint demos"

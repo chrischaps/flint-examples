@@ -2,8 +2,8 @@
 # and furniture, its doors, lights and sounds. Both tavern scenes place it
 # once, so the room is written once:
 #
-#   examples/phase4_runtime.scene.toml    the integration demo (and the web demo's front door)
-#   examples/showcase_tavern.scene.toml   the showcase, painterly, with its hidden passage
+#   phase4_runtime.scene.toml    the integration demo (and the web demo's front door)
+#   showcase_tavern.scene.toml   the showcase, painterly, with its hidden passage
 #
 #   [prefabs.room]
 #   template = "rusty_flint"
@@ -13,10 +13,10 @@
 # The people (player, bartender, patrons, stranger) and the scripts that run
 # the night belong to each scene.
 #
-# Every model and texture here comes from examples/tools/tavern_build.py (the
-# textures from examples/specs/tavern_*.procgen.toml); rebuild with
+# Every model and texture here comes from tools/tavern_build.py (the
+# textures from specs/tavern_*.procgen.toml); rebuild with
 #
-#   python examples/tools/tavern_build.py --textures
+#   python tools/tavern_build.py --textures
 #
 # The hall: x -6.85..6.85, z -4.85..9.85 inside, floor at 0, ceiling at 4.2,
 # all in the hall's own frame (the scenes' main_hall sits at the origin).

@@ -4,9 +4,9 @@
 # with an inked border round each panel, and the HUD is still free to draw
 # over the top (scripts/comic_panels.rhai letters a caption).
 #
-#   cargo run --bin flint -- render examples/comic_panels.scene.toml -o page.png
-#   cargo run --bin flint -- render examples/comic_panels.scene.toml --scripts --time 0..10 --fps 12 -o cuts.gif
-#   cargo run --bin flint-player -- examples/comic_panels.scene.toml
+#   flint render comic_panels.scene.toml -o page.png
+#   flint render comic_panels.scene.toml --scripts --time 0..10 --fps 12 -o cuts.gif
+#   flint-player comic_panels.scene.toml
 #
 # Without --scripts the page is the [panels] below. With them the script
 # cuts between layouts:

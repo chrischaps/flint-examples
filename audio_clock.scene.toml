@@ -9,8 +9,8 @@
 #  half a second and E pauses, and the pads stay on the clicks through
 #  both, while the summed clock shown above them falls behind.
 #
-#  Click track: python examples/tools/click_track.py
-#  Play:        cargo run --bin flint -- play examples/audio_clock.scene.toml
+#  Click track: python tools/click_track.py
+#  Play:        flint play audio_clock.scene.toml
 # ================================================================
 
 [scene]

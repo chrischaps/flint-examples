@@ -1,6 +1,6 @@
 # ASCII Crowd: 500 pillars, each in glyphs on a grid of its own (#336).
 #
-#   cargo run --bin flint -- render examples/ascii_crowd.scene.toml --output crowd.png --no-grid
+#   flint render ascii_crowd.scene.toml --output crowd.png --no-grid
 #
 # Every pillar carries `ascii_style { grid = "object" }`, which pins its
 # cells to its own projected origin, so each is a per-entity variant of

@@ -11,9 +11,9 @@
 #   mesh-less parent ... cart             (children: cart_bed, cart_wheel_l, cart_wheel_r)
 #   occluded ........... crate            (half behind the glass and the barrel)
 #
-#   cargo run --bin flint -- render examples/selection_outline.scene.toml --no-grid --select cart -o cart.png
+#   flint render selection_outline.scene.toml --no-grid --select cart -o cart.png
 #
-# The goldens in crates/flint-cli/tests/golden/selection.goldens.toml pin the
+# The goldens in engine/crates/flint-cli/tests/golden/selection.goldens.toml pin the
 # outline on several of these.
 
 [scene]

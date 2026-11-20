@@ -5,7 +5,7 @@
 #   [entities.hearth_flames.particle_effect]
 #   effect = "hearth_fire"
 #
-#   flint edit examples/particles/hearth_fire.particles.toml --render out.png --anim-time 1.5
+#   flint edit particles/hearth_fire.particles.toml --render out.png --anim-time 1.5
 
 name = "hearth_fire"
 seed = 1795

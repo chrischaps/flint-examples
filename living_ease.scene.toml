@@ -1,14 +1,14 @@
 # Easing a living prop's knobs (#514): one held flame whose echoes widen and
 # gather back, each over two seconds, where a plain tune_living would jump.
-# examples/scripts/living_ease.rhai asks `tune_living(map, seconds)`:
+# scripts/living_ease.rhai asks `tune_living(map, seconds)`:
 #
 #   0.5 s: echoes.spread 0.9 -> 1.8 steps, echoes.alpha 0.12 -> 0.35, over 2 s
 #   4.0 s: echoes.spread -> 0.3, over 2 s; echoes.count 4 -> 6 at once
 #
-#   cargo run --bin flint-player -- examples/living_ease.scene.toml
-#   cargo run --bin flint -- render examples/living_ease.scene.toml --scripts --time 1.5 -o ease.png
+#   flint-player living_ease.scene.toml
+#   flint render living_ease.scene.toml --scripts --time 1.5 -o ease.png
 #
-# The spec is specs/examples/form_living.procgen.toml.
+# The spec is engine/specs/examples/form_living.procgen.toml.
 
 [scene]
 name = "Living Ease"

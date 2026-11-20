@@ -1,8 +1,8 @@
 # The stylize props clearing (#271, #386): sky, two lights, the ground and
-# six props, none of them styled. examples/stylize_props.scene.toml places
+# six props, none of them styled. stylize_props.scene.toml places
 # it once and gives props their styles with overrides (ascii and pencil).
 # The stylize goldens' benches place a frozen copy of this prefab,
-# tests/fixtures/scenes/prefabs/stylize_props.prefab.toml (#763), so a
+# engine/tests/fixtures/scenes/prefabs/stylize_props.prefab.toml (#763), so a
 # change here moves no golden.
 #
 # Placed with prefix "props", so the entities are props_barrel, props_ybot...

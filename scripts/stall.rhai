@@ -4,8 +4,8 @@
 //
 // The wait is a helper of its own, `hold`, so a trace or `--perf` names
 // it as where on_update's time went (#1100):
-//   flint-player examples/hitch_metronome.scene.toml --trace stall.json
-//   flint-player examples/hitch_metronome.scene.toml --perf
+//   flint-player hitch_metronome.scene.toml --trace stall.json
+//   flint-player hitch_metronome.scene.toml --perf
 // In the trace, `stall.rhai:hold()` sits inside `stall.rhai:on_update`;
 // `--perf` says `stall.rhai:on_update ... (hold() 100.0)`.
 //

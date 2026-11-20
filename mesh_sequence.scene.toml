@@ -4,9 +4,9 @@
 # barrel, so a plain render still says where the trees go.
 #
 #   flint gen specs/oak_tree.procgen.toml --seed 1 -o out/oaks/oak_seed1.glb   (and so on)
-#   flint render examples/mesh_sequence.scene.toml --mesh tree_a=out/oaks --sheet -o oaks.png
-#   flint render examples/mesh_sequence.scene.toml --mesh tree_a=out/oaks -o oaks.gif --fps 4
-#   flint render examples/mesh_sequence.scene.toml --mesh tree_a=out/oaks \
+#   flint render mesh_sequence.scene.toml --mesh tree_a=out/oaks --sheet -o oaks.png
+#   flint render mesh_sequence.scene.toml --mesh tree_a=out/oaks -o oaks.gif --fps 4
+#   flint render mesh_sequence.scene.toml --mesh tree_a=out/oaks \
 #       --mesh tree_b='out/willows/w*.glb' -o frames/f-%03d.png
 #
 # `tree_a` stands alone in the middle; `tree_b` and `tree_c` stand either side

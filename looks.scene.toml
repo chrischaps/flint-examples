@@ -3,8 +3,8 @@
 # the scene's own keys, so the scene keeps its exposure and vignette and
 # takes the rest of graphite (the pencil style, its ssao, no bloom).
 #
-#   cargo run --bin flint -- render examples/looks.scene.toml --no-grid -o looks.png
-#   cargo run --bin flint-player -- examples/looks.scene.toml
+#   flint render looks.scene.toml --no-grid -o looks.png
+#   flint-player looks.scene.toml
 #
 # In the player, scripts/looks_tour.rhai walks the built-in looks with
 # set_look(), three seconds each (game time, so a --frame-step capture

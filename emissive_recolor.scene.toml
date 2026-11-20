@@ -17,9 +17,9 @@
 # The script (scripts/emissive_recolor.rhai) walks a palette, a stage every
 # 2.5 s, the figures a step behind one another:
 #
-#   cargo run --bin flint -- render examples/emissive_recolor.scene.toml --scripts --time 0.5 -o glow.png
-#   cargo run --bin flint -- render examples/emissive_recolor.scene.toml --scripts --time 0..10 --fps 12 -o glow.gif
-#   cargo run --bin flint -- play examples/emissive_recolor.scene.toml
+#   flint render emissive_recolor.scene.toml --scripts --time 0.5 -o glow.png
+#   flint render emissive_recolor.scene.toml --scripts --time 0..10 --fps 12 -o glow.gif
+#   flint play emissive_recolor.scene.toml
 #
 # Without --scripts the figures render as imported: grey joints, white glass.
 

@@ -7,11 +7,11 @@
 # Elements draw and stack in the order written here. Paths are from the
 # project root (the checkout, for the examples).
 #
-#   flint render examples/showcase_tavern.scene.toml --scripts --time 0.2 \
+#   flint render showcase_tavern.scene.toml --scripts --time 0.2 \
 #       --ui-focus restart -o pause.png        # the menu open, Restart focused
 
 [ui]
-style = "examples/ui/pause.style.toml"
+style = "ui/pause.style.toml"
 
 # The whole screen, dimmed; hidden until the game pauses
 [elements.pause_menu]

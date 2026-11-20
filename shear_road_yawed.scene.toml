@@ -4,15 +4,15 @@
 #
 #  A scanline racer's road: 8 m tiles, each pushed sideways and up by
 #  its distance (x += dx; dx += curve). Written by
-#  examples/tools/shear_road.py; edit that, not this.
+#  tools/shear_road.py; edit that, not this.
 #
 #  Each tile is YAWED to point at the next one, the old way: the
 #  120 m ground and the road's edges swing their far corners through
-#  the neighbouring tiles. Compare examples/shear_road.scene.toml.
+#  the neighbouring tiles. Compare shear_road.scene.toml.
 #
-#  Render:  cargo run --bin flint -- render examples/shear_road.scene.toml \
+#  Render:  flint render shear_road.scene.toml \
 #             --output renders/shear_road.png --no-grid
-#  Play:    cargo run --bin flint -- play examples/shear_road.scene.toml
+#  Play:    flint play shear_road.scene.toml
 # ================================================================
 
 [scene]

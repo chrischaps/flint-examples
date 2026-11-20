@@ -4,7 +4,7 @@
 # no two limbs agreeing. Few leaves, so you can see them disagree. It stands where
 # the field boils hardest.
 #
-#   flint gen examples/specs/grove_thorn.procgen.toml --strip -o thorn.png
+#   flint gen specs/grove_thorn.procgen.toml --strip -o thorn.png
 
 generator = "tree_v1"
 

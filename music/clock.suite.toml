@@ -1,7 +1,7 @@
-# The suite of examples/music_clock.scene.toml (#745): two stems, a pad and a
+# The suite of music_clock.scene.toml (#745): two stems, a pad and a
 # bell, on buses the suite names itself. No chart, no [reintegration], no
 # judgment windows: music for a scene to keep time by. Stems from
-# examples/tools/music_clock.py. Paths are from the project root.
+# tools/music_clock.py. Paths are from the project root.
 schema_version = 0
 
 [suite]
@@ -25,7 +25,7 @@ name = "rise"
 start_sample = 220500
 
 [buses.pad]
-file = "examples/music/stems/pad.flac"
+file = "music/stems/pad.flac"
 
 [buses.bell]
-file = "examples/music/stems/bell.flac"
+file = "music/stems/bell.flac"

@@ -12,7 +12,7 @@
 #  The crates are written below in a scrambled order on purpose:
 #  the file's order is not what decides anything.
 #
-#  Check:  flint-player examples/physics_pile.scene.toml \
+#  Check:  flint-player physics_pile.scene.toml \
 #            --frame-step 0.0166667 --screenshot a.png --screenshot-at 6
 #          twice; the two PNGs are byte-identical.
 # ================================================================

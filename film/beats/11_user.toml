@@ -1,4 +1,4 @@
-# Styles a game writes (#274, #275, ADR 0112): examples/styles/ holds three,
+# Styles a game writes (#274, #275, ADR 0112): styles/ holds three,
 # each a .shader.toml and one WGSL function, loaded at run time and not
 # compiled into the engine. The figure and the ball are projections
 # (`hologram`, which reads the style mask); then the script prints the

@@ -11,14 +11,14 @@
 #   block    hatching pinned to the block (grid = "object"): strokes travel with it
 #   ybot     blue pencil, heavy doubled outline (a skinned mesh)
 #
-#   cargo run --bin flint -- render examples/pencil_sketch.scene.toml --no-grid -o sketch.png
-#   cargo run --bin flint -- render examples/pencil_sketch.scene.toml --no-grid --style pencil:scope=screen -o page.png
+#   flint render pencil_sketch.scene.toml --no-grid -o sketch.png
+#   flint render pencil_sketch.scene.toml --no-grid --style pencil:scope=screen -o page.png
 #
 # The second command draws the whole frame in pencil, the props keeping
 # their own settings as variants. With grid=world (#389) the strokes lie on
 # the surfaces and hold as the camera moves:
 #
-#   cargo run --bin flint -- render examples/pencil_sketch.scene.toml --no-grid --style pencil:grid=world,scope=screen --frames 72 --frame-dt 0.0333 --orbit 25 -o orbit.png
+#   flint render pencil_sketch.scene.toml --no-grid --style pencil:grid=world,scope=screen --frames 72 --frame-dt 0.0333 --orbit 25 -o orbit.png
 #
 # Book: concepts/stylize-passes.md
 

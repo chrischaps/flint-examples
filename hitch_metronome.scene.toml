@@ -6,8 +6,8 @@
 # over it, counted under the graph; press F2 again for the graph alone,
 # small enough to leave on. The arm jumps on each one.
 #
-#   flint-player examples/hitch_metronome.scene.toml --stats
-#   flint-player examples/hitch_metronome.scene.toml --stats=graph
+#   flint-player hitch_metronome.scene.toml --stats
+#   flint-player hitch_metronome.scene.toml --stats=graph
 #
 # The stall reads the wall clock (Rhai's timestamp()), which a
 # deterministic capture refuses, so `flint render --scripts` shows the

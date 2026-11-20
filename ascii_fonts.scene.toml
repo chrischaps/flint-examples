@@ -1,7 +1,7 @@
 # ASCII Fonts: the ASCII Entities clearing, its props drawn in two glyph
 # sets in one frame (#335). It renders as is:
 #
-#   cargo run --bin flint -- render examples/ascii_fonts.scene.toml --output fonts.png
+#   flint render ascii_fonts.scene.toml --output fonts.png
 #
 # The scene's preset is the built-in 8x8 letters; the YBot and the barrel
 # name fonts/halftone.glyphs.toml, a dot screen drawn by hand in tall 8x12

@@ -1,6 +1,6 @@
 // Joint test bench controller (ADR 0069)
 //
-// Drives the three jointed rigs in examples/joint_test.scene.toml:
+// Drives the three jointed rigs in joint_test.scene.toml:
 //   * yaws the kinematic slider base with rotate_local(), which drags the
 //     sprung block along through the prismatic joint
 //   * flips the slider's motor target every two seconds

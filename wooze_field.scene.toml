@@ -8,13 +8,13 @@
 # quite rests, then back out, and then nearly still.
 #
 # A script changes the global step from 0.5 to 0.25 at 12 s, and every tree
-# follows without a jump. See examples/scripts/wooze_director.rhai.
+# follows without a jump. See scripts/wooze_director.rhai.
 #
-#   cargo run --release -p flint-player -- examples/wooze_field.scene.toml --exit-after 20
+#   cargo run --release -p flint-player -- wooze_field.scene.toml --exit-after 20
 #
 # prints a [wooze] line saying how far apart the field has put the props.
 #
-#   cargo run --bin flint -- validate examples/wooze_field.scene.toml
+#   flint validate wooze_field.scene.toml
 #
 # checks the table: break a zone and the message names it.
 

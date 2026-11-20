@@ -2,7 +2,7 @@
 # nearly black with smoke. The grain runs along the texture's x, so a model
 # lays u along a beam's length.
 #
-#   flint gen examples/specs/tavern_timber.procgen.toml -o examples/textures/tavern/tavern_timber.png
+#   flint gen specs/tavern_timber.procgen.toml -o textures/tavern/tavern_timber.png
 
 generator = "texture_v1"
 

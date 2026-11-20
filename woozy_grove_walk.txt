@@ -1,8 +1,8 @@
 # A walk through Woozy Grove (#217), for flint-player --input-script: in along the
 # north path to the bench, into the hush, across to the drowse, and on to the shiver.
 #
-#   flint-player examples/woozy_grove.scene.toml \
-#     --input-script examples/woozy_grove_walk.txt --exit-after 48
+#   flint-player woozy_grove.scene.toml \
+#     --input-script woozy_grove_walk.txt --exit-after 48
 #
 # Add --frame-step 0.0166667 to get the same walk every time. Any frame rate turns
 # the same way: the character takes mouse look once a frame (#728).
