@@ -8,7 +8,7 @@
 # the hall and open the front door. Each `wait` holds the lines after it
 # until the game shows what it asks, so the walk doesn't depend on how fast
 # the character moves; each `expect` is checked once. A line that doesn't
-# hold fails the run (`cargo test -p flint-cli --test playtest_cli` runs it).
+# hold fails the run (CI runs it: .github/workflows/ci.yml).
 
 # Before anything moves
 0.0  expect tavern_kitchen_door door.locked == true

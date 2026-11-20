@@ -37,3 +37,12 @@ jobs:
       # purpose, or a scene with an error diagnostic fails it.
       - name: flint examples --check
         run: engine/target/debug/flint examples --check
+
+      # The Phase 4 tavern's first eight seconds, played headless on a fixed
+      # clock (#714): walk to the bar, talk to the bartender, open the front
+      # door. Every line of the input script must hold. Flint's own
+      # playtest_cli ran this while the examples lived there.
+      - name: flint playtest (the tavern)
+        run: >-
+          engine/target/debug/flint playtest phase4_runtime.scene.toml
+          --input-script playtests/phase4_runtime.playtest.txt --exit-after 8
