@@ -1,0 +1,109 @@
+# Terminal glass (Flint #1182): text painted on a surface with
+# draw_world_text's `facing`, beside a billboard. The terminal's glass faces
+# +x; scripts/terminal_glass.rhai writes a prompt on it, which reads from the
+# +x side and foreshortens as the camera drifts round, and a name tag above
+# it that always faces the screen.
+#
+# The one thing to know: with `facing`, `size` is the em in world units.
+# The prompt's 0.024 is 24 mm letters on the glass. The name tag's 15 is
+# points, because it has no `facing`. Give a faced label 15 and it is a
+# 15 m em: the player warns, and from a few metres off it draws a corner of
+# one glyph or nothing.
+#
+#   flint play terminal_glass.scene.toml
+
+[scene]
+name = "Terminal Glass"
+version = "1.0"
+description = "Text on a plane with draw_world_text's facing: a prompt lying on a terminal's glass, beside a billboard (#1182)"
+
+[camera]
+position = [1.6, 1.15, 0.7]
+target = [0.2, 1.0, 0.0]
+fov = 45.0
+
+[environment]
+ambient_sky = [0.02, 0.026, 0.03]
+ambient_ground = [0.012, 0.01, 0.008]
+
+[entities.camera_rig]
+[entities.camera_rig.script]
+source = "terminal_glass.rhai"
+
+[entities.sky]
+[entities.sky.sky]
+zenith_color = [0.01, 0.012, 0.02, 1.0]
+horizon_color = [0.02, 0.03, 0.035, 1.0]
+haze_color = [0.02, 0.05, 0.04, 0.4]
+cloud_coverage = 0.0
+sun_glow = 0.0
+
+# A low lamp off to the side, warm against the screen's green
+[entities.lamp]
+[entities.lamp.transform]
+position = [0.6, 1.7, 1.1]
+[entities.lamp.light]
+type = "point"
+color = [1.0, 0.78, 0.55]
+intensity = 2.2
+range = 4.0
+
+# The screen's own spill, low on the desk below the glass
+[entities.spill]
+[entities.spill.transform]
+position = [0.45, 0.76, 0.0]
+[entities.spill.light]
+type = "point"
+color = [0.3, 1.0, 0.55]
+intensity = 0.35
+range = 0.9
+
+[entities.floor]
+[entities.floor.bounds]
+min = [-4, -0.02, -4]
+max = [4, 0.0, 4]
+[entities.floor.material]
+color = [0.08, 0.075, 0.07, 1.0]
+roughness = 0.9
+
+[entities.desk]
+[entities.desk.bounds]
+min = [-0.6, 0.68, -0.9]
+max = [0.9, 0.72, 0.9]
+[entities.desk.material]
+color = [0.32, 0.22, 0.14, 1.0]
+roughness = 0.7
+
+[entities.desk_leg]
+[entities.desk_leg.bounds]
+min = [-0.5, 0.0, -0.8]
+max = [-0.42, 0.68, 0.8]
+[entities.desk_leg.material]
+color = [0.2, 0.14, 0.09, 1.0]
+roughness = 0.8
+
+# The terminal: a cream case, its screen on the +x face
+[entities.case]
+[entities.case.bounds]
+min = [-0.32, 0.72, -0.3]
+max = [0.25, 1.28, 0.3]
+[entities.case.material]
+color = [0.72, 0.68, 0.58, 1.0]
+roughness = 0.6
+
+[entities.glass]
+[entities.glass.bounds]
+min = [0.25, 0.8, -0.25]
+max = [0.262, 1.2, 0.25]
+[entities.glass.material]
+color = [0.0, 0.0, 0.0, 1.0]
+roughness = 0.15
+emissive = [0.004, 0.03, 0.012]
+
+[entities.keyboard]
+[entities.keyboard.bounds]
+min = [0.36, 0.72, -0.24]
+max = [0.56, 0.745, 0.24]
+[entities.keyboard.material]
+color = [0.62, 0.58, 0.5, 1.0]
+roughness = 0.7

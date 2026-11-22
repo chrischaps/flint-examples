@@ -473,6 +473,11 @@ topic = "runtime"
 purpose = "random() under --frame-step and --seed: the same skies every run (#635)"
 
 [[example]]
+scene = "terminal_glass.scene.toml"
+topic = "runtime"
+purpose = "Text on a plane with draw_world_text's facing: a prompt on a terminal's glass, size in metres, beside a billboard (#1182)"
+
+[[example]]
 scene = "hud_glow.scene.toml"
 topic = "runtime"
 purpose = "Round wide strokes and glows on HUD text, beside eight stamped copies (#626)"
