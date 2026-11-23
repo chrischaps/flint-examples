@@ -26,7 +26,7 @@ $F/flint examples --check                    # what CI runs: indexed, and each v
 $F/flint check <scene>                       # every problem of one scene, scripts included
 $F/flint play phase4_runtime.scene.toml
 $F/flint render pbr_test.scene.toml --no-grid -o renders/pbr.png
-$F/flint capture tools/showcase/film.toml --shot 02_type --scale 0.5   # the film rig
+$F/flint capture film/film.toml --shot 02_type --scale 0.5   # the film rig
 ```
 
 A path in a scene is relative to the scene; a path a script names

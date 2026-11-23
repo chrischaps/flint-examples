@@ -5,5 +5,8 @@ render.png
 *.flintframe/
 .flint/
 
+# What the film's and tools' Python scripts leave beside themselves
+__pycache__/
+
 # The engine subtree's build output
 /engine/target/

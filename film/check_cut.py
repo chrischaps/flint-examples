@@ -1,9 +1,9 @@
 """Check a cut's encoded files frame by frame, and their sound (#436, #593).
 
-    python tools/showcase/check_cut.py master          # every file cut.py wrote for it
-    python tools/showcase/check_cut.py reel            # the reel and its stories
-    python tools/showcase/check_cut.py master --only master --only webm
-    python tools/showcase/check_cut.py master --dir D:/film/master/edit
+    python film/check_cut.py master          # every file cut.py wrote for it
+    python film/check_cut.py reel            # the reel and its stories
+    python film/check_cut.py master --only master --only webm
+    python film/check_cut.py master --dir D:/film/master/edit
 
 It reads the cut's `edit.json` (in `<film out>/<cut>/edit/`, or --dir), which
 lists every file cut.py encoded and which of the composed frames each holds,
@@ -64,8 +64,8 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[2]
-HERE = ROOT / "tools" / "showcase"
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 import synth  # noqa: E402
 
@@ -298,7 +298,7 @@ def bars(edit):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cut", nargs="?", default="master", help="a cut in tools/showcase/cuts/")
+    ap.add_argument("cut", nargs="?", default="master", help="a cut in film/cuts/")
     ap.add_argument("--dir", help="the cut's edit folder (default <film out>/<cut>/edit)")
     ap.add_argument("--only", action="append", help="only these files, by key (master, mp4, "
                     "webm, story_1 ...)")
@@ -309,7 +309,7 @@ def main():
               else Path(os.path.expanduser(film["out"])) / args.cut / "edit")
     record = folder / "edit.json"
     if not record.exists():
-        raise SystemExit(f"no {record}: python tools/showcase/cut.py {args.cut}")
+        raise SystemExit(f"no {record}: python film/cut.py {args.cut}")
     edit = json.loads(record.read_text(encoding="utf-8"))
     ref = np.load(folder / edit["thumbs"])
     fps = edit["fps"]

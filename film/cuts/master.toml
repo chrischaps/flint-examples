@@ -1,10 +1,10 @@
 # The 16:9 master (#436, #593): Many Hands for the chaps.dev YouTube channel,
 # and a lighter copy of it for the Flint page.
 #
-#   python tools/showcase/capture.py --cut master    # the takes it uses, 3840x2160, 60 fps
-#   python tools/showcase/music.py master            # its score, to this list
-#   python tools/showcase/cut.py master              # master MP4, web MP4 + WebM, poster
-#   python tools/showcase/check_cut.py master        # every frame, the sound, the music's frames
+#   python film/cut.py master --capture              # the takes it uses, 3840x2160, 60 fps
+#   python film/music.py master            # its score, to this list
+#   python film/cut.py master              # master MP4, web MP4 + WebM, poster
+#   python film/check_cut.py master        # every frame, the sound, the music's frames
 #
 # One file per cut, read by the picture and the music alike (the reel is
 # cuts/reel.toml). The film's clock is the music's: 100 bpm in 4/4, so a bar
@@ -35,7 +35,7 @@ tail_bars = 2
 # Lower thirds, title cards and look tags (the reel's are "caption")
 titles = "lower_third"
 fade_in_s = 0.6
-# The soundtrack, written to this list by `python tools/showcase/music.py master`
+# The soundtrack, written to this list by `python film/music.py master`
 audio = "~/flint-film/music/many-hands-master.wav"
 
 # The last bars: the evening darkens a little and the card comes up, then black

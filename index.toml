@@ -23,7 +23,7 @@
 #   world      terrain, grass, water and particles
 #   runtime    scripting, physics, audio, HUD and input
 #   2d         sprites, 2D cameras and 2D collision
-#   film       the showcase film's set (tools/showcase, #722)
+#   film       the showcase film: its set, shot list, score and editor (#722, Flint #1195)
 
 # --- showcase ---------------------------------------------------------------
 

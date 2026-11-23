@@ -12,7 +12,7 @@ At the end every hand plays a bar of it, and it comes home to D as the
 camera rises into the evening; the crickets that opened the film keep on
 after it.
 
-`arrange(cut)` turns a cut list (tools/showcase/cuts/<cut>.toml) into six
+`arrange(cut)` turns a cut list (film/cuts/<cut>.toml) into six
 stems and the mix automation that flint-music plays them with:
 
   foundation   bass and a soft heartbeat kick
@@ -183,7 +183,7 @@ def _phrase(bar: int) -> tuple[str, int]:
 
 def _clicks(beat_id: str) -> list[float]:
     """Mouse clicks and key taps of a beat's input script, in take seconds."""
-    path = Path(__file__).resolve().parents[2] / "film/beats" / f"{beat_id}.input.txt"
+    path = Path(__file__).resolve().parent / "beats" / f"{beat_id}.input.txt"
     out = []
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -563,10 +563,10 @@ def suite_toml(cut: Cut, stems_dir: str) -> str:
     bar_samples = int(BAR * BEAT_S * SR)
     lines = [
         f"# *Many Hands*, the showcase film's music: the {cut.name} cut (#438).",
-        "# Written by tools/showcase/music.py from tools/showcase/cuts/"
+        "# Written by film/music.py from film/cuts/"
         f"{cut.name}.toml; edit the cut",
         "# list or score.py and rebuild, never this file. Every sound is original:",
-        "# synthesized by tools/showcase/synth.py, no samples.",
+        "# synthesized by film/synth.py, no samples.",
         "schema_version = 0",
         "",
         "[suite]",
@@ -633,7 +633,7 @@ def events_toml(cut: Cut) -> str:
         add(last, "set_gain", b, db=fade, ramp_ms=BAR * BEAT_S * 1000.0)
 
     ev.sort(key=lambda e: (e[0], e[1] != "marker"))
-    lines = [f"# Mix automation for the {cut.name} cut (#438), written by tools/showcase/music.py:",
+    lines = [f"# Mix automation for the {cut.name} cut (#438), written by film/music.py:",
              "# a marker at every shot, each shot's bus levels, the watercolor's lift and",
              "# the menu drag as low-passes, and the last bar's fade. Times in beats",
              "# from the start (100 bpm: a beat is 0.6 s).",

@@ -1,7 +1,7 @@
 # *Many Hands*, the showcase film's music: the master cut (#438).
-# Written by tools/showcase/music.py from tools/showcase/cuts/master.toml; edit the cut
+# Written by film/music.py from film/cuts/master.toml; edit the cut
 # list or score.py and rebuild, never this file. Every sound is original:
-# synthesized by tools/showcase/synth.py, no samples.
+# synthesized by film/synth.py, no samples.
 schema_version = 0
 
 [suite]
