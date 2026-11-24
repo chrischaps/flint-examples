@@ -36,7 +36,7 @@ exclude = [
     "scripts/showcase_ambience.rhai",
     "scripts/showcase_hud.rhai",
     "scripts/showcase_passage.rhai",
-    # the showcase film's capture sets (tools/showcase), and a preview
+    # the showcase film (its sets, shot list, score and editor), and a preview
     # still no scene reads
     "film/**",
     "luminarium_preview.png",

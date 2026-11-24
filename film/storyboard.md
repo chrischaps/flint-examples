@@ -20,7 +20,7 @@ do.
 
 The set is `film/set.toml`, written once; each beat is a fragment in
 `film/beats/` that adds its styles and its script, and
-`tools/showcase/build_scenes.py` joins them into `film/<beat>.scene.toml`.
+`film/build_scenes.py` joins them into `film/<beat>.scene.toml`.
 All content is Flint's own (the meadow mask, the demo props, the built-in
 glyphs and palettes, the styles in `styles/`).
 
@@ -89,7 +89,7 @@ story's beats, the reveal's ramps, the mask's colours).
   master: see [The vertical cut](#the-vertical-cut-437) below.
 - **Music** (#438) is on the beats' own clock, 100 bpm in 4/4 (02 changes
   every 2.4 s, a bar), and it is arranged to the cut lists in
-  `tools/showcase/cuts/`: cut on bar or half-bar lines and the music
+  `film/cuts/`: cut on bar or half-bar lines and the music
   changes with the picture. See [Music](#music) below.
 
 ### The 16:9 cut (#436, #593)
@@ -109,21 +109,21 @@ instrument where the picture changes hand.
 
 **Tools.** ffmpeg does the encode (8.0, the gyan.dev full build:
 `winget install Gyan.FFmpeg`; it is not in the repo, and a rebuild needs it
-on the PATH). The edit is `tools/showcase/cut.py` (Python, Pillow, numpy),
+on the PATH). The edit is `film/cut.py` (Python, Pillow, numpy),
 the reel's editor too: it composes each film frame from its source PNG,
 draws the titles over it and pipes raw RGB to ffmpeg with the WAV, so no
 editor project file has to be kept in step with the takes, and the film
 rebuilds after a beat is recaptured:
 
 ```bash
-python tools/showcase/cut.py master --capture --dry-run    # write the master's shot list
+python film/cut.py master --capture --dry-run    # write the master's shot list
 flint capture ~/flint-film/master/shots.toml --shot 08_pencil   # reshoot a beat after a style ticket lands
-python tools/showcase/music.py master                     # the score, if a shot moved
-python tools/showcase/cut.py master                       # master, web, poster, with the score
-python tools/showcase/check_cut.py master                 # every frame, the sound, the bars
+python film/music.py master                     # the score, if a shot moved
+python film/cut.py master                       # master, web, poster, with the score
+python film/check_cut.py master                 # every frame, the sound, the bars
 ```
 
-The cut is a file, `tools/showcase/cuts/master.toml`, and the music is
+The cut is a file, `film/cuts/master.toml`, and the music is
 scored to the same file: shots (a take, where in it to start, how many
 bars), the titles, `[encode]` and `[web]`. Titles are drawn in the edit
 rather than by the beats' `hud.rhai`, so the takes stay clean for the
@@ -224,9 +224,9 @@ changed in it, and what didn't:
 
 ## The vertical cut (#437)
 
-The Instagram reel and its stories: `tools/showcase/cuts/reel.toml`,
+The Instagram reel and its stories: `film/cuts/reel.toml`,
 captured with `capture.py --cut reel` at 1080x1920 and cut by
-`tools/showcase/cut.py reel` into `reel.mp4` and four story pieces.
+`film/cut.py reel` into `reel.mp4` and four story pieces.
 
 **Length.** 24 bars at 100 bpm (2.4 s a bar, the clock beat 02 already
 changes on), 57.6 s, inside the 30 to 60 s asked for. Every cut is on a
@@ -322,18 +322,18 @@ there as it fades.
 
 | Cut | List | Bars | Length | Frames at 30 fps |
 |---|---|---|---|---|
-| 16:9 master (#436, #593) | `tools/showcase/cuts/master.toml` | 48 + a 2-bar tail where 13 runs on | 120.0 s | 3600 (7200 at its 60) |
-| 9:16 reel (#437) | `tools/showcase/cuts/reel.toml` | 24, four 6-bar stories | 57.6 s | 1728 |
+| 16:9 master (#436, #593) | `film/cuts/master.toml` | 48 + a 2-bar tail where 13 runs on | 120.0 s | 3600 (7200 at its 60) |
+| 9:16 reel (#437) | `film/cuts/reel.toml` | 24, four 6-bar stories | 57.6 s | 1728 |
 
 ```bash
-python tools/showcase/music.py          # ~/flint-film/music/many-hands-<cut>.wav (+ .json)
-python tools/showcase/music.py --plot   # and a sheet: shots, spectrogram, bus levels
+python film/music.py          # ~/flint-film/music/many-hands-<cut>.wav (+ .json)
+python film/music.py --plot   # and a sheet: shots, spectrogram, bus levels
 ```
 
 `score.py` arranges the theme to a cut's shots; `synth.py` synthesizes the
 six stems flint-music mixes (foundation, harmony, world voice, theme,
 the figure's motif, texture); `music.py` writes the suite and its event
-script (`tools/showcase/music/<cut>.suite.toml`, `.events.toml`: a marker
+script (`film/music/<cut>.suite.toml`, `.events.toml`: a marker
 at every shot, each shot's bus levels, the watercolor and menu low-passes,
 the last bar's fade), renders them with `flint music render`, and masters
 to -14 LUFS integrated (BS.1770-4) under a -1.5 dBTP ceiling, 48 kHz
@@ -342,7 +342,7 @@ byte-identical on one machine (numpy 2.3, scipy 1.17).
 
 **Every sound is original.** The score was written for this film, and
 every note and noise in it is synthesized from sines, noise and FM by
-`tools/showcase/synth.py`: no samples, loops, presets or recordings from
+`film/synth.py`: no samples, loops, presets or recordings from
 anywhere else, and no library music. YouTube's Content ID and Instagram's
 audio matching have nothing to match it against, and the rights are
 Chris's. If a platform flags it anyway, this page and the build command
@@ -355,14 +355,14 @@ quarter-bars, and each cut ends on a whole bar.
 
 ## Capture
 
-`tools/showcase/capture.py` until #722, which made it `flint capture`;
+`film/capture.py` until #722, which made it `flint capture`;
 the notes below that name `capture.py` are from before.
 
 ```bash
 cargo build --release --bin flint
-flint capture tools/showcase/film.toml            # every beat, every take, 3840x2160
-flint capture tools/showcase/film.toml --scale 0.5 --shot 02_type  # one beat at 1920x1080
-flint capture tools/showcase/film.toml --verify   # each take twice, compared
+flint capture film/film.toml            # every beat, every take, 3840x2160
+flint capture film/film.toml --scale 0.5 --shot 02_type  # one beat at 1920x1080
+flint capture film/film.toml --verify   # each take twice, compared
 ```
 
 Takes land outside the repo (`~/flint-film/<beat>/<take>/frame_0001.png`;

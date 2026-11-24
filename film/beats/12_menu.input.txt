@@ -1,5 +1,5 @@
 # Beat 12's hands on the F4 Styles editor (#268). Points on the film's
-# 1920x1080-point canvas (tools/showcase/capture.py scales them). Rows and
+# 1920x1080-point canvas (`flint capture` scales them). Rows and
 # combo entries found by capturing the menu at each step; if its layout
 # changes, capture again and move them.
 # Re-measured after #356 put a Look row (and #369 a Freeze checkbox) above

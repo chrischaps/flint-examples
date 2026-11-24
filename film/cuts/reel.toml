@@ -1,7 +1,7 @@
 # The vertical cut (#437): Many Hands for an Instagram reel and story.
 #
-#   python tools/showcase/capture.py --cut reel      # the takes it uses, 1080x1920
-#   python tools/showcase/cut.py reel               # reel.mp4 + four story pieces
+#   python film/cut.py reel --capture               # the takes it uses, 1080x1920
+#   python film/cut.py reel               # reel.mp4 + four story pieces
 #
 # One file per cut (the master is cuts/master.toml, #436). Shots are on the
 # music's bar grid (#438): 100 bpm in 4/4, one bar = 2.4 s = 72 frames at
@@ -41,7 +41,7 @@ safe = [120, 250, 960, 1480]
 # cut.py says what it couldn't find and which it used instead)
 caption_font = ["georgiai.ttf", "DejaVuSerif-Italic.ttf"]
 label_font = ["CascadiaMono.ttf", "consola.ttf", "DejaVuSansMono.ttf"]
-# The soundtrack, written to this cut's bars by `python tools/showcase/music.py
+# The soundtrack, written to this cut's bars by `python film/music.py
 # reel` (#438); cut.py cuts silent, and says so, until it exists
 audio = "~/flint-film/music/many-hands-reel.wav"
 

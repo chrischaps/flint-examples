@@ -76,8 +76,8 @@ bench.
 The folders beside the scenes (`models/`, `textures/`, `scripts/`,
 `particles/`, `styles/`, ...) are the examples' assets, found by the
 engine's asset search (beside the scene, each folder above it up to this
-root, then `engine/`). `film/` is the showcase film's set, and
-`tools/showcase/` its rig and storyboard ("Many Hands"). `tools/` also holds
+root, then `engine/`). `film/` is the showcase film ("Many Hands"): its set, shot list,
+storyboard, score and editor. `tools/` holds
 the scripts that made some of the assets.
 
 Whole films and places, made to be watched rather than to show one

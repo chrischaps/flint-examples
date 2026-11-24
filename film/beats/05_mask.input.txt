@@ -1,5 +1,5 @@
 # Beat 05's hands on the F4 menu (#263, #268). Pointer positions are in
-# points on the film's 1920x1080-point canvas; tools/showcase/capture.py
+# points on the film's 1920x1080-point canvas; `flint capture`
 # scales them to the take's pixels (the player reads window pixels).
 # Rows found by capturing the menu at each step: if the menu's layout
 # changes, capture again and move them.

@@ -1,9 +1,9 @@
 """Build the showcase film's music (#438): one WAV per cut, as long as the cut.
 
-    python tools/showcase/music.py                 # every cut in tools/showcase/cuts/
-    python tools/showcase/music.py reel            # one
-    python tools/showcase/music.py --out D:/film   # somewhere else (default ~/flint-film/music)
-    python tools/showcase/music.py --verify        # build twice, compare every byte
+    python film/music.py                 # every cut in film/cuts/
+    python film/music.py reel            # one
+    python film/music.py --out D:/film   # somewhere else (default ~/flint-film/music)
+    python film/music.py --verify        # build twice, compare every byte
 
 For each cut list `cuts/<cut>.toml` it
 
@@ -36,7 +36,7 @@ import numpy as np
 from scipy.io import wavfile
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 
 import score  # noqa: E402

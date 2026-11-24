@@ -1,20 +1,20 @@
 """Cut the showcase film together from its captured takes (#437, #593).
 
-    python tools/showcase/cut.py master --capture   # the takes a cut uses, at its size
-    python tools/showcase/music.py master           # its score, to the same list
-    python tools/showcase/cut.py master             # master MP4, web MP4 + WebM, poster
-    python tools/showcase/check_cut.py master       # every frame, the sound, the bars
-    python tools/showcase/cut.py reel               # reel.mp4 and its four stories
+    python film/cut.py master --capture   # the takes a cut uses, at its size
+    python film/music.py master           # its score, to the same list
+    python film/cut.py master             # master MP4, web MP4 + WebM, poster
+    python film/check_cut.py master       # every frame, the sound, the bars
+    python film/cut.py reel               # reel.mp4 and its four stories
 
-    python tools/showcase/cut.py master --dry-run         # the timeline; does the music fit it?
-    python tools/showcase/cut.py master --still 2.0,40.5  # those film times as PNG, and stop
-    python tools/showcase/cut.py reel --stills 6          # a few frames as PNG beside the film
-    python tools/showcase/cut.py reel --guides            # the safe area over every frame
-    python tools/showcase/cut.py master --scale 0.5       # takes captured with --scale 0.5
-    python tools/showcase/cut.py master --web-only        # the web files again, from the master
-    python tools/showcase/cut.py master --silent          # no soundtrack: a picture check
+    python film/cut.py master --dry-run         # the timeline; does the music fit it?
+    python film/cut.py master --still 2.0,40.5  # those film times as PNG, and stop
+    python film/cut.py reel --stills 6          # a few frames as PNG beside the film
+    python film/cut.py reel --guides            # the safe area over every frame
+    python film/cut.py master --scale 0.5       # takes captured with --scale 0.5
+    python film/cut.py master --web-only        # the web files again, from the master
+    python film/cut.py master --silent          # no soundtrack: a picture check
 
-One editor for every cut. A cut is `tools/showcase/cuts/<name>.toml`, the
+One editor for every cut. A cut is `film/cuts/<name>.toml`, the
 same file its music is scored to (music.py): a [cut] table (size, fps, the
 bar grid, the titles' layout, the soundtrack) and its [[shot]]s in order,
 each a take of a beat from `start_s` seconds for a number of bars. The last
@@ -72,7 +72,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-ROOT = HERE.parents[1]
+ROOT = HERE.parent
 
 # The cut's own file, piped from the frames, unless its [encode] says
 # otherwise: H.264 High, BT.709, a keyframe a second, AAC.
@@ -92,11 +92,11 @@ TAG_709 = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:rang
 # --- The cut ---------------------------------------------------------------
 
 def load_cut(name):
-    """A cut's file, tools/showcase/cuts/<name>.toml: [cut] and [[shot]]."""
+    """A cut's file, film/cuts/<name>.toml: [cut] and [[shot]]."""
     path = HERE / "cuts" / f"{name}.toml"
     if not path.exists():
         have = sorted(p.stem for p in (HERE / "cuts").glob("*.toml"))
-        raise SystemExit(f"no cut {name!r} in tools/showcase/cuts/ (have {have})")
+        raise SystemExit(f"no cut {name!r} in film/cuts/ (have {have})")
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
@@ -150,7 +150,7 @@ def build_timeline(cut, takes):
         paths = [folder / f"frame_{first + k:04d}.png" for k in range(n + tail)]
         missing = [p for p in (paths[0], paths[-1]) if not p.exists()]
         if missing:
-            raise SystemExit(f"{what} needs {missing[0]}: python tools/showcase/cut.py "
+            raise SystemExit(f"{what} needs {missing[0]}: python film/cut.py "
                              f"{c['name']} --capture")
         # A take stepped at another rate would play at the wrong speed
         record = folder / "take.json"
@@ -161,7 +161,7 @@ def build_timeline(cut, takes):
                 raise SystemExit(
                     f"{folder} was captured {made.get('width')}x{made.get('height')} at "
                     f"{made.get('fps')} fps; the cut is {c['width']}x{c['height']} at {fps}: "
-                    f"python tools/showcase/cut.py {c['name']} --capture (or --scale here)")
+                    f"python film/cut.py {c['name']} --capture (or --scale here)")
         shots.append({**shot, "take": take, "index": i, "first": len(frames), "frames": n,
                       "tail": tail})
         frames += paths
@@ -897,8 +897,8 @@ def cut_shot_list(cut, film):
     f = film["capture"]
     out = Path(os.path.expanduser(f["out"])) / c["name"]
     lines = [
-        f"# The takes cut {c['name']!r} uses (tools/showcase/cuts/{c['name']}.toml),",
-        "# written by tools/showcase/cut.py --capture from tools/showcase/film.toml.",
+        f"# The takes cut {c['name']!r} uses (film/cuts/{c['name']}.toml),",
+        "# written by film/cut.py --capture from film/film.toml.",
         "",
         "[capture]",
         f"title = {toml_str(f.get('title', 'film') + ' (' + c['name'] + ')')}",
@@ -971,7 +971,7 @@ def capture(name, scale, flags):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cut", help="a cut in tools/showcase/cuts/ (master, reel)")
+    ap.add_argument("cut", help="a cut in film/cuts/ (master, reel)")
     ap.add_argument("--frames", help="the cut's takes (default <film out>/<cut>)")
     ap.add_argument("--out", help="where the films go (default <frames>/edit)")
     ap.add_argument("--audio", help="the soundtrack (default the cut's `audio`)")
@@ -1039,12 +1039,12 @@ def main():
         audio = Path(os.path.expanduser(given))
         audio = audio if audio.is_absolute() else (ROOT / audio).resolve()
         if not audio.exists():
-            raise SystemExit(f"no soundtrack at {audio}: python tools/showcase/music.py "
+            raise SystemExit(f"no soundtrack at {audio}: python film/music.py "
                              f"{c['name']} (or --silent)")
         music, problems = music_report(cut, shots, total, audio)
         if problems and not (args.audio and music is None):
             raise SystemExit(f"{audio.name} doesn't fit this picture:\n  " + "\n  ".join(problems)
-                             + f"\nrebuild it: python tools/showcase/music.py {c['name']}")
+                             + f"\nrebuild it: python film/music.py {c['name']}")
         for p in problems:
             print(f"  warning: {p}", file=sys.stderr)
         if music:
@@ -1111,7 +1111,7 @@ def main():
         record["poster"] = poster.name
         print(f"wrote {poster}")
     record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    print(f"wrote {record_path}; check it: python tools/showcase/check_cut.py {c['name']}")
+    print(f"wrote {record_path}; check it: python film/check_cut.py {c['name']}")
 
 
 def cut_master(cut, args, frames, frame_plan, ovs, pieces, master, audio, out_dir, name):
