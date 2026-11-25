@@ -1,6 +1,7 @@
 //! The ASCII passes' uniform blocks, edge formats and layouts (moved from
 //! `ascii.rs`, #742).
 
+use crate::gpu_counts::CountedDevice;
 use super::*;
 
 #[repr(C)]
@@ -88,6 +89,9 @@ pub(super) struct AsciiUniforms {
     /// (x0, y0, x1, y1): outside it the passes read no mask
     /// ([`StyleFrame::mask_rect`], the whole frame when that is `None`).
     pub(super) mask_rect: [f32; 4],
+    /// Each of `snap_grids`' band in the snap owner state (#929,
+    /// [`OwnerBand::packed`]); zeros for a grid without one.
+    pub(super) snap_bands: [[i32; 4]; MAX_SNAP_GRIDS],
 }
 
 /// One per-entity variant's settings (#266), a row of the variant table's
@@ -148,6 +152,9 @@ pub(super) struct VariantUniform {
     /// (x0, y0, x1, y1): its draws' screen bounds and the mask's rounding
     /// ([`StyleFrame::variant_rect`]), the whole frame when they have none.
     pub(super) bounds: [f32; 4],
+    /// With [`SNAP`], its grid's band in the snap owner state (#929,
+    /// [`OwnerBand::packed`]); zeros for none.
+    pub(super) owner: [i32; 4],
 }
 
 /// The rect [`rect_corners`] made, back.
@@ -318,6 +325,20 @@ pub(super) const EDGE_SLOT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R3
 /// How many cells bigger than the grid the thin pass's texture is on each
 /// side (`THIN_PAD` in ascii_edge_slot.wgsl).
 pub(super) const EDGE_THIN_PAD: u32 = 1;
+/// How many of the largest cell in play the glyph pass's rect reaches past
+/// the styled entities' screen bounds (#385): a whole cell (a snapped
+/// silhouette) round any styled pixel, and one more.
+pub(super) const GLYPH_RECT_CELLS: u32 = 2;
+/// How many cells from a cell the edge cells its glyph depends on this
+/// frame can be (#930): the corner pass reads the thin pass's texels a
+/// cell round it (`ascii_edge_corners.wgsl`, the diagonal ones too), and a
+/// thin texel's arms read the lines of its four neighbours, each of which
+/// reads the neighbour it leans to (`ascii_edge_thin.wgsl`): one plus two,
+/// along an axis. Every cell within this of a cell the glyph pass draws is
+/// one the edge cell pass writes: `edge_regions` takes the cells under the
+/// glyph rect (`GLYPH_RECT_CELLS` round the entities) and this many less
+/// that round them. A pass that reads further raises it.
+pub(super) const EDGE_CORNER_REACH: u32 = 3;
 
 
 /// A fragment uniform buffer at binding 0.
@@ -375,7 +396,7 @@ impl Owned {
         let size = [size[0].max(1), size[1].max(1)];
         if slot.as_ref().is_none_or(|o| o.size != size) {
             let generation = slot.as_ref().map_or(0, |o| o.generation + 1);
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
+            let texture = device.create_texture_counted(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
                     width: size[0],
@@ -395,7 +416,7 @@ impl Owned {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind = device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some(label),
                 layout,
                 entries: &[wgpu::BindGroupEntry {

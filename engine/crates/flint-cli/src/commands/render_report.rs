@@ -2,8 +2,13 @@
 //! were captured, so an agent can explain what it sees. `flint query` reads scene
 //! files and none of this is in one: a lineage is, but which pose a prop has reached
 //! and what the field told it exist only once it's running.
+//!
+//! The render paths read a stage's props through [`of_game`] (#1333): in a
+//! build without the living package the player grows none, and the report
+//! says so with empty lists.
 
-use flint_procgen::{LivingPropId, LivingProps, Resolved, Stagger};
+#[cfg(feature = "living")]
+use flint_living::{KnobValue, LivingKnob, LivingPropId, LivingProps, Resolved};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -43,6 +48,10 @@ pub struct RenderReport {
     /// Left out of the JSON when nothing was.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub style_drops: Vec<flint_render::stylize::variant_table::Dropped>,
+    /// `--load-report` (#1092): where the load's time went, from the scene
+    /// read to the first capture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load: Option<flint_core::load_report::LoadReport>,
 }
 
 /// One way a script failed (#693), as `flint_script::ScriptError` counts it.
@@ -140,54 +149,33 @@ pub struct ValueReport {
 /// of the report does.
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(untagged)]
+// Made from a living prop's values: never, in a build without the package
+#[cfg_attr(not(feature = "living"), allow(dead_code))]
 pub enum ReportValue {
     Number(f32),
     Count(u32),
     Flag(bool),
-    Name(&'static str),
+    Name(String),
 }
 
-impl From<f32> for ReportValue {
-    fn from(value: f32) -> Self {
-        Self::Number(value)
+#[cfg(feature = "living")]
+impl From<&KnobValue> for ReportValue {
+    fn from(value: &KnobValue) -> Self {
+        match value {
+            KnobValue::Number(value) => Self::Number(*value),
+            KnobValue::Count(value) => Self::Count(*value),
+            KnobValue::Flag(value) => Self::Flag(*value),
+            KnobValue::Name(value) => Self::Name(value.clone()),
+        }
     }
 }
 
-impl From<u32> for ReportValue {
-    fn from(value: u32) -> Self {
-        Self::Count(value)
-    }
-}
-
-impl From<bool> for ReportValue {
-    fn from(value: bool) -> Self {
-        Self::Flag(value)
-    }
-}
-
-impl From<&'static str> for ReportValue {
-    fn from(value: &'static str) -> Self {
-        Self::Name(value)
-    }
-}
-
-fn value<T: Into<ReportValue>>(resolved: Resolved<T>) -> ValueReport {
+#[cfg(feature = "living")]
+fn value(resolved: &Resolved<KnobValue>) -> ValueReport {
     ValueReport {
-        value: resolved.value.into(),
+        value: (&resolved.value).into(),
         layer: resolved.layer.label(),
     }
-}
-
-fn stagger_value(resolved: Resolved<Stagger>) -> ValueReport {
-    let name = match resolved.value {
-        Stagger::None => "none",
-        Stagger::PerLevel => "per_level",
-        Stagger::PerBranch => "per_branch",
-    };
-    value(Resolved {
-        value: name,
-        layer: resolved.layer,
-    })
 }
 
 /// Which poses a prop was drawn between, from the blend that drew it. A staggered
@@ -219,6 +207,7 @@ pub struct WoozeReport {
 /// Every prop as it stands, by name, since a scene's entities load in no fixed
 /// order and two runs ought to read the same.
 /// `field` is the stage's, where its clock stands.
+#[cfg(feature = "living")]
 pub fn props_report(
     props: &LivingProps,
     field: Option<(&flint_wooze::WoozeField, f64)>,
@@ -269,34 +258,23 @@ pub fn props_report(
 }
 
 /// Each value a species can set on a prop, by the key a scene gives it.
+#[cfg(feature = "living")]
 fn values_of(
     props: &LivingProps,
     id: LivingPropId,
     field: Option<(&flint_wooze::WoozeField, f64)>,
 ) -> BTreeMap<&'static str, ValueReport> {
     let at = props.resolved(id, field);
-    BTreeMap::from([
-        ("amplitude", value(at.amplitude)),
-        ("step", value(at.step)),
-        ("glide", value(at.glide)),
-        ("jitter", value(at.jitter)),
-        ("stagger", stagger_value(at.stagger)),
-        ("echoes.count", value(at.echo_count)),
-        ("echoes.spread", value(at.echo_spread)),
-        ("echoes.alpha", value(at.echo_alpha)),
-        ("variance.amount", value(at.variance_amount)),
-        ("variance.steady", value(at.variance_steady)),
-        ("variance.keep_size", value(at.keep_size)),
-        ("softness", value(at.softness)),
-        ("jitter_rate", value(at.jitter_rate)),
-        ("row_rate", value(at.row_rate)),
-    ])
+    (at.iter())
+        .map(|(knob, resolved): (LivingKnob, _)| (knob.key(), value(resolved)))
+        .collect()
 }
 
 /// How the values a sweep's column set compare with what its props actually read:
 /// nothing to say if they agree, or the spread if zones kept some off it.
+#[cfg(feature = "living")]
 pub fn read_note(knob: &str, set: Option<f32>, props: &LivingProps) -> String {
-    let read = |prop: &flint_procgen::LivingProp| {
+    let read = |prop: &flint_living::LivingProp| {
         let wooze = prop.wooze();
         match knob {
             "amplitude" => Some(wooze.amplitude),
@@ -319,6 +297,68 @@ pub fn read_note(knob: &str, set: Option<f32>, props: &LivingProps) -> String {
         format!("PROPS READ {low:.2}")
     } else {
         format!("PROPS READ {low:.2}-{high:.2}")
+    }
+}
+
+/// A stage's living props and wooze field as the render paths read them.
+#[cfg(feature = "living")]
+pub mod of_game {
+    use flint_player::HeadlessGame;
+
+    /// Every prop as it stands (`--report json`'s `props`).
+    pub fn props(game: &HeadlessGame) -> Vec<super::PropReport> {
+        game.living_props()
+            .map_or_else(Vec::new, |props| super::props_report(props, game.wooze()))
+    }
+
+    /// How many props the scene grew.
+    pub fn count(game: &HeadlessGame) -> usize {
+        game.living_props().map_or(0, |props| props.props().len())
+    }
+
+    /// The entities that grew into props.
+    pub fn entities(game: &HeadlessGame) -> Vec<flint_core::EntityId> {
+        game.living_props().map_or_else(Vec::new, |props| {
+            props.props().iter().map(|prop| prop.entity()).collect()
+        })
+    }
+
+    /// What a wooze column's props read, against what it set.
+    pub fn read_note(game: &HeadlessGame, knob: &str, set: Option<f32>) -> String {
+        game.living_props()
+            .map_or_else(String::new, |props| super::read_note(knob, set, props))
+    }
+
+    /// The zones of the stage's wooze field, with one.
+    pub fn wooze_zones(game: &HeadlessGame) -> Option<usize> {
+        game.wooze().map(|(field, _)| field.zones().len())
+    }
+}
+
+/// Built without the living package: the player grows no props and runs
+/// no field, so there is nothing to read.
+#[cfg(not(feature = "living"))]
+pub mod of_game {
+    use flint_player::HeadlessGame;
+
+    pub fn props(_: &HeadlessGame) -> Vec<super::PropReport> {
+        Vec::new()
+    }
+
+    pub fn count(_: &HeadlessGame) -> usize {
+        0
+    }
+
+    pub fn entities(_: &HeadlessGame) -> Vec<flint_core::EntityId> {
+        Vec::new()
+    }
+
+    pub fn read_note(_: &HeadlessGame, _: &str, _: Option<f32>) -> String {
+        String::new()
+    }
+
+    pub fn wooze_zones(_: &HeadlessGame) -> Option<usize> {
+        None
     }
 }
 
@@ -351,6 +391,7 @@ mod tests {
             warnings: vec![],
             script_errors: vec![],
             style_drops: vec![],
+            load: None,
         };
         let json: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&report).unwrap()).unwrap();
@@ -362,6 +403,7 @@ mod tests {
         assert!(json["captures"][0].get("column").is_none());
     }
 
+    #[cfg(feature = "living")]
     #[test]
     fn no_props_means_nothing_to_note() {
         let props = LivingProps::new(1024);

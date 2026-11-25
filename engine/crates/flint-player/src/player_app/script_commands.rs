@@ -55,21 +55,9 @@ impl PlayerApp {
     /// until this is called from its Begin click; on the desktop the device
     /// opened at start and this does nothing new. Loops already in the
     /// scene start, and a subsystem that waited for a device (the scene's
-    /// music) starts at the next frame's first stage. Says whether there is
-    /// sound.
+    /// music) starts at the next frame's first stage, in the browser's
+    /// worklet like every other sound (#1216). Says whether there is sound.
     pub fn start_audio(&mut self) -> bool {
-        // A music session clocks its suite on kira's manager itself, which
-        // the browser's worklet mix (#136) keeps on the audio thread; such a
-        // scene mixes on the main thread, as before.
-        #[cfg(all(target_arch = "wasm32", feature = "music"))]
-        if !self.audio.engine.is_available() && crate::music::plays_music(&self.core.world) {
-            tracing::info!(
-                "[flint-audio] a music_session needs kira here: mixing on the main thread"
-            );
-            self.audio
-                .engine
-                .set_web_mixer(flint_audio::engine::WebMixer::MainThread);
-        }
         self.audio.start(&self.core.world)
     }
 }
@@ -145,6 +133,15 @@ impl ScriptHost for PlayerApp {
         let _ = self.audio.engine.set_bus_volume_named(&bus, volume);
     }
 
+    // The player's own, apart from the game's and saved (#1217, user_audio.rs)
+    fn set_user_bus_volume(&mut self, bus: String, volume: f64) {
+        PlayerApp::set_user_bus_volume(self, &bus, volume);
+    }
+
+    fn set_bus_lowpass(&mut self, bus: String, hz: f64) {
+        let _ = self.audio.engine.set_bus_lowpass_named(&bus, hz);
+    }
+
     fn fire_event(&mut self, name: String, data: toml::Value) {
         // The core hands on only a transition's script saying it's done
         // (`game_core::for_the_host`); any other event called here goes on
@@ -158,8 +155,10 @@ impl ScriptHost for PlayerApp {
         match &self.transition_phase {
             TransitionPhase::Exiting { target_scene, .. } => {
                 let target = target_scene.clone();
+                // The script says its cover is drawn (#1125)
                 self.transition_phase = TransitionPhase::Loading {
                     target_scene: target,
+                    covered: true,
                 };
             }
             TransitionPhase::Entering { .. } => {
@@ -206,6 +205,12 @@ impl ScriptHost for PlayerApp {
     fn set_look(&mut self, name: Option<String>, seconds: f64) {
         if let Err(e) = PlayerApp::fade_to_look(self, name.as_deref(), seconds) {
             tracing::warn!("set_look: {e}");
+        }
+    }
+
+    fn prepare_look(&mut self, name: String) {
+        if let Err(e) = PlayerApp::prepare_look(self, &name) {
+            tracing::warn!("prepare_look: {e}");
         }
     }
 

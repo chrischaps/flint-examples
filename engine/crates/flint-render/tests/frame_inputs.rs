@@ -5,12 +5,14 @@
 //!
 //! These need a GPU adapter. Without one each test prints a note and passes.
 
+#![allow(clippy::disallowed_methods)] // the test's own targets and read-backs, not the renderer's, so uncounted (#1091)
+
 mod shared_gpu;
 
+use flint_core::field_frame::BoilFrame;
 use flint_core::world_line::WorldLine;
 use flint_ecs::FlintWorld;
 use flint_render::{Camera, FrameInputs, RendererConfig, SceneBinding, SceneRenderer};
-use flint_wooze::BoilFrame;
 use std::path::PathBuf;
 
 const SIZE: u32 = 96;

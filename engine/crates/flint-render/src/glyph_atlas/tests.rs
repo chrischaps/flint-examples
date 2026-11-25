@@ -1,4 +1,5 @@
 use super::*;
+use crate::gpu_counts::CountedDevice;
 use flint_core::bundle::{Bundle, BundleManifest};
 use flint_core::project::AssetScope;
 use flint_core::vfs::{self, MemorySource};
@@ -770,16 +771,18 @@ fn a_set_loads_from_a_game_bundle() {
 
 #[test]
 fn the_atlas_uploads_and_reads_back() {
-    let Ok(ctx) = pollster::block_on(crate::HeadlessContext::new(4, 4)) else {
+    // The binary's shared device (#1275)
+    let Some(gpu) = crate::shared_gpu::lease() else {
         crate::gpu_select::skip_without_gpu("no GPU adapter");
         return;
     };
+    let ctx = gpu.gpu;
     let atlas = GlyphAtlas::builtin();
     let gpu = GpuGlyphAtlas::upload(&ctx.device, &ctx.queue, &atlas, "glyph atlas test");
     assert_eq!(gpu.size, atlas.size());
     let [w, h] = gpu.size;
     let padded = w.div_ceil(256) * 256;
-    let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+    let buffer = ctx.device.create_buffer_counted(&wgpu::BufferDescriptor {
         label: Some("glyph readback"),
         size: (padded * h) as u64,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,

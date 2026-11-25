@@ -7,7 +7,10 @@
 //! hears what it found, once a frame, right after. A hitch in the first
 //! [`STARTUP_SECS`] of game time (loading's last uploads, the first
 //! pipeline compiles) is counted apart as `startup` and is held against
-//! `--max-hitches-startup` only.
+//! `--max-hitches-startup` only. A hitch of a scene loaded behind a
+//! script's cover (`Hitch::loading`, #1125) is tallied as `loading` alone,
+//! said on its own `[perf] loading hitches` line, and held against a limit
+//! only with `--max-hitches-of loading`.
 //!
 //! A log line waits for the [`AROUND`] frames after its hitch, so it shows
 //! the frames either side; it is written once they have closed, about
@@ -17,6 +20,8 @@
 
 use super::frame_history::FrameHistory;
 use super::hitch::{Cause, Hitch, HitchDetector};
+use super::os_pacing::OsPacing;
+use super::sampler_marks::SamplerMarks;
 use crate::hitch_args::{HitchClass, HitchGate, STARTUP_SECS};
 use serde::Serialize;
 use std::io::Write;
@@ -28,16 +33,23 @@ const CAUSES_NAMED: usize = 4;
 
 /// The hitches of one part of the run (the start, or after it), all of
 /// them and each class's apart, so a gate narrowed to one class names
-/// that class's worst and causes (#1130).
+/// that class's worst and causes (#1130). A scene loaded behind a
+/// script's cover (#1125) is `loading` alone: in neither `all` nor its
+/// player/elsewhere class, since the player saw none of it.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Tally {
     pub all: Seen,
     pub player: Seen,
     pub elsewhere: Seen,
+    pub loading: Seen,
 }
 
 impl Tally {
     fn add(&mut self, h: &Hitch) {
+        if h.loading {
+            self.loading.add(h);
+            return;
+        }
         self.all.add(h);
         match h.cause {
             Cause::Player { .. } => self.player.add(h),
@@ -53,6 +65,7 @@ impl Tally {
             HitchClass::All => &self.all,
             HitchClass::Player => &self.player,
             HitchClass::Elsewhere => &self.elsewhere,
+            HitchClass::Loading => &self.loading,
         }
     }
 }
@@ -127,8 +140,9 @@ struct LogLine {
     median_ms: f64,
     /// Under vsync, the refreshes it ran past its one; `null` without.
     missed_refreshes: Option<u32>,
-    /// `player`, `elsewhere` or `tooling` (the player's own screenshot or
-    /// F2 overlay, #1129).
+    /// `player`, `elsewhere`, `tooling` (the player's own screenshot or
+    /// F2 overlay, #1129) or `loading` (a scene loaded behind a script's
+    /// cover, #1125; `phase` and `script` still say whose work it was).
     class: &'static str,
     /// In the first [`STARTUP_SECS`] of game time.
     startup: bool,
@@ -145,9 +159,9 @@ struct LogLine {
     /// and handing it back.
     acquire_ms: Option<f64>,
     present_ms: Option<f64>,
-    /// The GPU's busy time read back in it (a frame or two old), beside
-    /// the waits: a long acquire with a long GPU frame waited on the GPU,
-    /// one without on the compositor. `null` while the GPU isn't timed.
+    /// The GPU's busy time on its own work (#1104), beside the waits: a
+    /// long acquire with a long GPU frame waited on the GPU, one without on
+    /// the compositor. `null` while the GPU isn't timed.
     gpu_ms: Option<f64>,
     /// [`Hitch::cause_line`].
     cause: String,
@@ -225,7 +239,7 @@ impl LogLine {
             judged_ms: r2(h.judged_ms),
             median_ms: r2(h.median_ms),
             missed_refreshes: h.refreshes.map(|r| r.saturating_sub(1)),
-            class: h.cause.label(),
+            class: h.class(),
             startup,
             player_ms: r2(h.player_ms),
             phase,
@@ -261,6 +275,9 @@ struct Log {
     written: u64,
     /// The first write that failed: the log stops there, said once.
     failed: Option<String>,
+    /// Each hitch on a sampling profiler's timeline too (#1250); `None`
+    /// for a log a test reads.
+    marks: Option<SamplerMarks>,
 }
 
 impl Log {
@@ -303,6 +320,8 @@ pub(crate) struct HitchWatch {
     /// The wall time of the frames after the start, seconds: what the
     /// report's hitches a minute are over.
     after_start_secs: f64,
+    /// The frames the OS held back, a hidden window's (#1200).
+    pub os_pacing: OsPacing,
 }
 
 impl HitchWatch {
@@ -314,7 +333,16 @@ impl HitchWatch {
             out,
             written: 0,
             failed: None,
+            marks: None,
         });
+    }
+
+    /// Mark each hitch where a sampler records it as well (#1250).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the web opens no file
+    pub(crate) fn mark_for_samplers(&mut self, marks: SamplerMarks) {
+        if let Some(log) = &mut self.log {
+            log.marks = Some(marks);
+        }
     }
 
     /// The detector has judged this frame's newest record and found
@@ -338,7 +366,13 @@ impl HitchWatch {
                 } else {
                     self.run.add(h);
                 }
-                if self.log.is_some() {
+                if let Some(log) = &mut self.log {
+                    // Marked now, the frame after it: the line waits for
+                    // the frames after, and an ETW event is stamped when
+                    // it is written
+                    if let Some(marks) = &mut log.marks {
+                        marks.hitch(h);
+                    }
                     self.pending.push(LogLine::of(h, startup, history));
                 }
             }
@@ -365,10 +399,21 @@ impl HitchWatch {
             if f.game_time >= STARTUP_SECS {
                 self.after_start_secs += f.ms as f64 / 1000.0;
             }
+            // Said as the run becomes held, so a run with no report hears it
+            if let Some(line) = self.os_pacing.add(f) {
+                tracing::info!(target: "perf", "{line}");
+            }
             for line in &mut self.pending {
                 if f.index > line.frame && line.after_ms.len() < AROUND {
                     line.after_ms.push(r2(f.ms));
                 }
+            }
+        }
+        // The hitch's own GPU time, back a frame or two after it (#1104):
+        // the line waits AROUND frames, so it is on the record by then
+        for line in &mut self.pending {
+            if line.gpu_ms.is_none() {
+                line.gpu_ms = history.frame(line.frame).and_then(|f| f.gpu_ms).map(r2);
             }
         }
     }
@@ -426,6 +471,13 @@ impl HitchWatch {
         None
     }
 
+    /// The wall seconds of the frames after the start: what the report's
+    /// hitches a minute are over.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the report's, desktop only
+    pub(crate) fn after_start_secs(&self) -> f64 {
+        self.after_start_secs
+    }
+
     /// `--exit-after`'s lines (`[perf] hitches: ...`).
     pub(crate) fn report(&self) -> Vec<String> {
         let mut lines = Vec::new();
@@ -449,6 +501,8 @@ impl HitchWatch {
                 r.worst_and_causes()
             ));
         }
+        // Why there were none to find, when the OS held the frames (#1200)
+        lines.extend(self.os_pacing.report());
         let s = &self.startup.all;
         let gated = match self.gate.and_then(|g| g.max_startup) {
             Some(max) => format!("--max-hitches-startup {max}"),
@@ -463,6 +517,29 @@ impl HitchWatch {
                 "[perf] startup hitches (before t={STARTUP_SECS:.0} s, {gated}): {}, {}",
                 s.hitches,
                 s.worst_and_causes()
+            ));
+        }
+        // Said only when there were any: most runs load no scene behind a
+        // fade (#1125). The start's are the start's, said beside them
+        let (l, ls) = (&self.run.loading, &self.startup.loading);
+        if l.hitches + ls.hitches > 0 {
+            let gated = match self.gate {
+                Some(g) if g.of == HitchClass::Loading => "--max-hitches-of loading",
+                _ => "not gated",
+            };
+            let start = if ls.hitches > 0 {
+                format!(" (and {} in the start)", ls.hitches)
+            } else {
+                String::new()
+            };
+            let worst = if l.hitches > 0 {
+                format!(", {}", l.worst_and_causes())
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "[perf] loading hitches (scene loads behind a script's cover, {gated}): {}{start}{worst}",
+                l.hitches
             ));
         }
         // Said only when there were any: most runs take no screenshot
@@ -480,8 +557,13 @@ impl HitchWatch {
                 .as_ref()
                 .map(|e| format!(", stopped: {e}"))
                 .unwrap_or_default();
+            let marks = log
+                .marks
+                .as_ref()
+                .map(|m| format!("; sampler marks: {}", m.said()))
+                .unwrap_or_default();
             lines.push(format!(
-                "[perf] hitch log: {} ({} {}{failed})",
+                "[perf] hitch log: {} ({} {}{failed}){marks}",
                 log.name,
                 log.written,
                 plural(log.written, "line", "lines")
@@ -522,9 +604,9 @@ impl HitchReadout {
         let horizon = history.frames().back().map_or(0.0, |f| f.end() - secs);
         let mut window = 0;
         let mut worst: Option<&Hitch> = None;
-        // The game's, not its tools' (#1129): the run's count leaves them out
-        // too
-        let game = detector.hitches().iter().filter(|h| !h.cause.is_tooling());
+        // The game's, not its tools' (#1129) nor a covered load's (#1125):
+        // the run's count leaves them out too
+        let game = detector.hitches().iter().filter(|h| h.is_game());
         for h in game.filter(|h| h.at >= horizon) {
             window += 1;
             if worst.is_none_or(|w| h.ms > w.ms) {
@@ -587,6 +669,8 @@ impl super::PlayerApp {
         self.stats
             .watch
             .log_to(path.display().to_string(), Box::new(file));
+        let marks = super::sampler_marks::SamplerMarks::open(path, self.stats.perf.start);
+        self.stats.watch.mark_for_samplers(marks);
         self.watch_hitches();
         Ok(())
     }
@@ -640,6 +724,9 @@ mod tests {
         watch: HitchWatch,
         t: Instant,
         game: f64,
+        /// The refresh the clock paces to; `None`, no vsync. Under it the
+        /// rest of each frame is the swapchain's acquire.
+        vsync_ms: Option<f32>,
     }
 
     impl Run {
@@ -653,6 +740,7 @@ mod tests {
                 watch: HitchWatch::default(),
                 t,
                 game: 0.0,
+                vsync_ms: None,
             }
         }
 
@@ -666,12 +754,16 @@ mod tests {
             );
             h.record_scripts(&[("scripts/stall.rhai:on_update".into(), script_ms as f32)]);
             self.t += Duration::from_secs_f64(wall / 1000.0);
+            if self.vsync_ms.is_some() {
+                h.mark_at(Phase::Acquire, self.t);
+            }
             h.begin_frame_at(self.t);
+            let refresh = self.vsync_ms;
             h.clock_ticked(ClockSample {
                 raw_ms: wall as f32,
                 dt_ms: HZ60 as f32,
-                paced_ms: None,
-                vsync_ms: None,
+                paced_ms: refresh.map(|r| (wall as f32 / r).round().max(1.0) * r),
+                vsync_ms: refresh,
             });
             self.game += HZ60 / 1000.0;
             h.game_time(self.game);
@@ -684,6 +776,47 @@ mod tests {
                 self.frame(HZ60, 0.5);
             }
         }
+    }
+
+    #[test]
+    fn a_window_the_os_holds_finds_no_hitch_and_the_report_says_why() {
+        // #1200: under vsync, a hidden window's frames stood ~400 ms each,
+        // nearly all of it the swapchain's acquire, and a 100 ms script
+        // stall every few frames couldn't stand out against that median
+        let mut run = Run::new();
+        run.vsync_ms = Some(HZ60 as f32);
+        for i in 0..300 {
+            let stall = i > 150 && i % 7 == 0;
+            run.frame(
+                if stall { 500.0 } else { 400.0 },
+                if stall { 100.0 } else { 0.5 },
+            );
+        }
+        let report = run.watch.report();
+        assert!(report[0].starts_with("[perf] hitches: 0 in "), "{report:?}");
+        assert!(
+            report[1]
+                .starts_with("[perf] frames held by the OS: 179 of 179 after t=2 s, at ~400 ms"),
+            "{report:?}"
+        );
+        assert!(report[1].contains("FLINT_VSYNC=off"), "{report:?}");
+
+        // The same scene shown: the stalls are hitches and nothing is said
+        let mut run = Run::new();
+        run.vsync_ms = Some(HZ60 as f32);
+        for i in 0..300 {
+            let stall = i > 150 && i % 60 == 0;
+            run.frame(
+                if stall { 116.7 } else { HZ60 },
+                if stall { 100.0 } else { 0.5 },
+            );
+        }
+        let report = run.watch.report();
+        assert!(report[0].starts_with("[perf] hitches: 2 ("), "{report:?}");
+        assert!(
+            report.iter().all(|l| !l.contains("held by the OS")),
+            "{report:?}"
+        );
     }
 
     #[test]
@@ -750,7 +883,9 @@ mod tests {
         watch.log_to("mem".into(), Box::new(log.clone()));
         let surface = Stalls(Cell::new(Duration::ZERO));
         let mut game = 3.0;
-        let mut frame = |stall: f64, gpu: Option<f32>| {
+        // Each frame's GPU time comes back two frames after it (#1104)
+        let mut in_flight = std::collections::VecDeque::new();
+        let mut frame = |stall: f64, gpu: f32| {
             // `tick`: the frame begins, and the clock measures the last
             perf.begin_frame();
             let last_ms = perf.frames().back().map_or(0.0, |f| f.ms);
@@ -771,19 +906,25 @@ mod tests {
             surface.0.set(Duration::from_secs_f64(stall / 1000.0));
             assert_eq!(perf.acquire(&surface).err(), Some(SurfaceError::Timeout));
             perf.mark(Phase::Render);
-            perf.gpu_ms(gpu);
+            in_flight.push_back((perf.gpu_frame_index(), gpu));
+            if in_flight.len() > 2 {
+                let (index, ms) = in_flight.pop_front().unwrap();
+                perf.gpu_time(index, ms);
+            }
             perf.mark(Phase::Hud);
             perf.presented_at(Instant::now());
             perf.mark(Phase::Present);
         };
         for _ in 0..60 {
-            frame(0.0, Some(1.5));
+            frame(0.0, 1.5);
         }
-        frame(STALL_MS, Some(1.5));
+        // The stalled frame's own GPU work was long: its time, not the
+        // 1.5 ms of the frame its read-back arrives in, is the line's
+        frame(STALL_MS, 9.0);
         // Its line waits for the frames after it; the next frame's start
         // closes the stalled one
         for _ in 0..=AROUND + 1 {
-            frame(0.0, Some(1.5));
+            frame(0.0, 1.5);
         }
         let lines = log.lines();
         let l = lines
@@ -794,7 +935,13 @@ mod tests {
         assert_eq!(l["phase"], serde_json::Value::Null);
         assert!(l["player_ms"].as_f64().unwrap() < 40.0, "{l}");
         assert!(l["present_ms"].as_f64().is_some(), "{l}");
-        assert_eq!(l["gpu_ms"], 1.5);
+        assert_eq!(l["gpu_ms"], 9.0, "the hitch's own GPU time: {l}");
+        let hitch = detector.last().unwrap();
+        assert_eq!(hitch.index, l["frame"].as_u64().unwrap());
+        assert_eq!(hitch.gpu_ms, Some(9.0), "filled in once it came back");
+        let record = perf.frame(hitch.index).unwrap();
+        assert_eq!(record.gpu_ms, Some(9.0));
+        assert_eq!(perf.frame(hitch.index + 1).unwrap().gpu_ms, Some(1.5));
         assert!(
             l["cause"]
                 .as_str()

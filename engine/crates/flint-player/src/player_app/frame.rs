@@ -5,6 +5,7 @@
 
 use super::camera_cut;
 use super::hud_render::render_draw_commands;
+use super::offscreen::HudTarget;
 use super::subsystem::{EncodeCtx, FrameCtx};
 use super::PlayerApp;
 use super::TransitionPhase;
@@ -50,6 +51,39 @@ impl PlayerApp {
         }
     }
 
+    /// What the frame is drawn with, laid before it is drawn: a look the
+    /// scripts or a panel asked for, a look's cross-fade at this game time,
+    /// then the scripts' post overrides over both. The window's frame and a
+    /// rendered playtest's (#1191) both start here.
+    pub(super) fn lay_frame_looks(&mut self) {
+        if let Some((look, seconds)) = self.style.pending_look.take() {
+            if let Err(e) = self.fade_to_look(look.as_deref(), seconds) {
+                tracing::warn!("look: {e}");
+            }
+        }
+        // A look's cross-fade (#496) eases what the two looks differ in, at
+        // this frame's game time (#1157), under the scripts' overrides
+        // stamped below
+        self.lay_look_fade(self.core.clock.total_time);
+
+        // Apply script-driven post-processing overrides before rendering.
+        // The Rendering & Effects panel's freeze switch (ADR 0053) skips the
+        // stamp entirely so panel edits to contended fields stick; the
+        // drained overrides are plain Options re-filled each tick, so nothing
+        // piles up and un-freezing resumes on the next script write.
+        #[cfg(feature = "debug-hud")]
+        let pp_stamp_frozen = self.post.debug_freeze;
+        #[cfg(not(feature = "debug-hud"))]
+        let pp_stamp_frozen = false;
+        if let Some(renderer) = &mut self.scene_renderer {
+            if !pp_stamp_frozen && self.post.any() {
+                let mut config = renderer.post_process_config().clone();
+                self.post.stamp(&mut config);
+                renderer.set_post_process_config(config);
+            }
+        }
+    }
+
     pub(super) fn render(&mut self) {
         flint_core::scope!("render");
         // On Android, window may be None between suspended() and resumed()
@@ -57,14 +91,7 @@ impl PlayerApp {
             return;
         }
         self.update_render_scale();
-        if let Some((look, seconds)) = self.style.pending_look.take() {
-            if let Err(e) = self.fade_to_look(look.as_deref(), seconds) {
-                tracing::warn!("look: {e}");
-            }
-        }
-        // A look's cross-fade (#496) eases what the two looks differ in, on
-        // game time, under the scripts' overrides stamped below
-        self.step_look_fade(self.core.clock.delta_time);
+        self.lay_frame_looks();
         // The presented frame as a PNG (#583): a capture line on the
         // expression socket, `--record`. Nothing at all while neither asks
         #[cfg(not(target_arch = "wasm32"))]
@@ -98,21 +125,6 @@ impl PlayerApp {
         };
 
         let view = context.frame_view(&output.texture);
-
-        // Apply script-driven post-processing overrides before rendering.
-        // The Rendering & Effects panel's freeze switch (ADR 0053) skips the
-        // stamp entirely so panel edits to contended fields stick; the
-        // drained overrides are plain Options re-filled each tick, so nothing
-        // piles up and un-freezing resumes on the next script write.
-        #[cfg(feature = "debug-hud")]
-        let pp_stamp_frozen = self.post.debug_freeze;
-        #[cfg(not(feature = "debug-hud"))]
-        let pp_stamp_frozen = false;
-        if !pp_stamp_frozen && self.post.any() {
-            let mut config = renderer.post_process_config().clone();
-            self.post.stamp(&mut config);
-            renderer.set_post_process_config(config);
-        }
 
         // Every panel applies its edits and reads back what it shows (#744):
         // one loop, no panel asked its name. What they tell the player comes
@@ -156,6 +168,7 @@ impl PlayerApp {
         if self.stats.view == super::StatsView::Full
             || (self.stats.perf.readout && self.stats.perf.gpu_wanted)
             || self.stats.perf.trace.is_some()
+            || self.stats.report.is_some()
         {
             if !renderer.gpu_timing() {
                 self.stats.gpu_timing =
@@ -223,8 +236,8 @@ impl PlayerApp {
                 renderer: &mut *renderer,
                 world: &self.core.world,
                 camera: &self.camera,
-                #[cfg(feature = "procgen")]
-                resolver: &mut self.core.procgen_resolver,
+                #[cfg(feature = "living")]
+                living: &mut self.core.living_props,
             };
             self.core.subsystems.post_encode(&mut ctx);
         }
@@ -275,6 +288,11 @@ impl PlayerApp {
                     &place,
                 );
             }
+            // Its GPU time comes back under its number in the history, to
+            // be laid on its own record a frame or two on (#1104)
+            if let Some(timer) = renderer.gpu_timer_mut() {
+                timer.set_frame_index(self.stats.perf.gpu_frame_index());
+            }
             renderer.encode_gpu_timings(&context.device, &mut encoder);
             {
                 flint_core::scope!("submit");
@@ -293,17 +311,19 @@ impl PlayerApp {
                 self.stats.perf.trace.as_deref_mut(),
                 renderer.gpu_timer_mut(),
             ) {
-                trace.tracks.gpu(timer.take_traced());
+                trace.tracks.gpu(timer.take_traced(), timer.timestamps());
             }
-            // The GPU time read back this frame, for the frame history
-            self.stats.perf.gpu_ms(renderer.take_gpu_frame_ms());
+            // The GPU times read back this frame, each onto the frame it
+            // timed in the history
+            for time in renderer.take_gpu_frame_times() {
+                self.stats.perf.gpu_time(time.index, time.ms);
+            }
             #[cfg(not(target_arch = "wasm32"))]
             {
                 if let Some(info) = &capture_adapter {
                     let targets = super::frame_capture::Targets::of(context, &output.texture, info);
                     let facts = super::frame_capture::FrameFacts {
                         world: &self.core.world,
-                        camera: &self.camera,
                         particles: self
                             .particles_render_enabled
                             .then_some(&self.core.particles.sync),
@@ -353,10 +373,27 @@ impl PlayerApp {
                 || flint_core::project::shown(&path),
             );
             match self.write_screenshot(&output.texture, &path) {
-                Ok(()) => self.capture.written += 1,
+                Ok(shot) => {
+                    self.capture.written += 1;
+                    self.capture.shots.push(shot);
+                }
                 Err(reason) => {
                     tracing::warn!("screenshot: {reason}");
                     self.capture.note_failure(reason);
+                }
+            }
+        }
+        // An input script's `screenshot <file>` lines (#1191)
+        for path in self.capture.take_scripted() {
+            let _shot = flint_core::frame_notes::begin(
+                flint_core::frame_notes::NoteKind::Screenshot,
+                || flint_core::project::shown(&path),
+            );
+            match self.write_screenshot(&output.texture, &path) {
+                Ok(shot) => self.capture.shots.push(shot),
+                Err(reason) => {
+                    tracing::warn!("screenshot: {reason}");
+                    self.capture.scripted_failures.push(reason);
                 }
             }
         }
@@ -366,6 +403,8 @@ impl PlayerApp {
             context.queue.present(output);
         }
         let presented = web_time::Instant::now();
+        // A load's first frame is on screen: its table (#1092)
+        self.frame_presented_for_loads();
         self.stats.perf.presented_at(presented);
         self.perf_mark(super::perf::Phase::Present);
         #[cfg(target_arch = "wasm32")]
@@ -375,6 +414,16 @@ impl PlayerApp {
 
         if let Some(exit_after) = self.capture.exit_after {
             if self.core.clock.total_time >= super::PERF_SKIP_SECS {
+                // `--perf-report`'s GPU passes: every frame from here (#1093)
+                if self.stats.report.is_some() {
+                    if let Some(timer) =
+                        self.scene_renderer.as_mut().and_then(|r| r.gpu_timer_mut())
+                    {
+                        if !timer.tallying() {
+                            timer.tally(true);
+                        }
+                    }
+                }
                 self.capture.perf_frames += 1;
                 self.capture.perf_time += self.core.clock.delta_time;
                 self.capture
@@ -391,6 +440,10 @@ impl PlayerApp {
                     if stats.gpu_frame_ms > 0.0 {
                         self.capture.perf_gpu_ms += stats.gpu_frame_ms as f64;
                         self.capture.perf_gpu_frames += 1;
+                    }
+                    self.capture.perf_gpu_calls += stats.gpu_calls;
+                    if stats.gpu_calls.created() > 0 {
+                        self.capture.perf_gpu_creating += 1;
                     }
                 }
             }
@@ -410,9 +463,10 @@ impl PlayerApp {
     pub(super) fn print_exit_report(&mut self) {
         // Headless perf figure: average frame time over the run, so a
         // scene change can be A/B'd without watching the overlay.
-        let frames = self.capture.perf_frames;
-        if frames > 0 {
-            let avg_ms = self.capture.perf_time * 1000.0 / frames as f64;
+        // The lines and `--perf-report`'s file both come from these (#1093)
+        let numbers = self.exit_numbers();
+        if let Some(n) = &numbers {
+            let (frames, avg_ms) = (n.frames, n.mean_ms());
             // The run's figures as fields too, for `--log-format json` (#716)
             tracing::info!(
                 target: "report",
@@ -420,42 +474,42 @@ impl PlayerApp {
                 avg_ms = (avg_ms * 100.0).round() / 100.0,
                 fps = (10_000.0 / avg_ms).round() / 10.0,
                 "[perf] {frames} frames over {:.2} s after t={:.0}: avg {avg_ms:.2} ms/frame ({:.1} fps)",
-                self.capture.perf_time,
+                n.secs,
                 super::PERF_SKIP_SECS,
                 1000.0 / avg_ms
             );
-            // How even they were: a mean hides bursts (#406).
-            if let Some(dt) = self.capture.perf_pacing.dt() {
-                tracing::info!(target: "report", "[perf] dt: {dt}");
+            // How even they were: a mean hides bursts (#406); the F2
+            // overlay's main figures, averaged, so a capture can compare
+            // draw counts and culling headlessly (H9); the GPU's time when
+            // the frames were timed (--stats, ADR 0108), which under vsync
+            // reads high on an idle GPU's clocks (#380)
+            let present = self
+                .render_context
+                .as_ref()
+                .map(|c| c.present_mode_in_use());
+            let note = n.gpu.map_or(String::new(), |g| {
+                super::perf::gpu_vsync_note(present, g.mean_ms as f32, avg_ms as f32)
+            });
+            for line in n.lines(&note) {
+                tracing::info!(target: "report", "{line}");
             }
-            if let Some(present) = self.capture.perf_pacing.present() {
-                tracing::info!(target: "report", "[perf] present to present: {present}");
-            }
-            // The F2 overlay's main figures, averaged, so a capture
-            // can compare draw counts and culling headlessly (H9).
-            let avg = |sum: u64| sum as f64 / frames as f64;
-            tracing::info!(target: "report",
-                "[perf] avg per frame: {:.0} draw calls ({:.0} entity draws, {:.0} culled, {:.0} of them by LOD), {:.0} triangles, {:.0} in shadows",
-                avg(self.capture.perf_draws),
-                avg(self.capture.perf_entity_draws),
-                avg(self.capture.perf_culled),
-                avg(self.capture.perf_lod_culled),
-                avg(self.capture.perf_triangles),
-                avg(self.capture.perf_shadow_triangles)
-            );
-            // GPU time, when the frames were timed (--stats, ADR 0108).
-            let gpu_frames = self.capture.perf_gpu_frames;
-            if gpu_frames > 0 {
-                let gpu_ms = self.capture.perf_gpu_ms / gpu_frames as f64;
-                // Under vsync an idle GPU clocks down and reads high (#380).
-                let present = self
-                    .render_context
-                    .as_ref()
-                    .map(|c| c.present_mode_in_use());
+            // The GPU memory the renderer holds as the run ends (#1091)
+            if let (Some(r), Some(ctx)) = (&self.scene_renderer, &self.render_context) {
+                let device = flint_render::gpu_counts::device_memory(&ctx.device);
                 tracing::info!(target: "report",
-                    "[perf] avg GPU {gpu_ms:.2} ms/frame over {gpu_frames} timed frames{}",
-                    super::perf::gpu_vsync_note(present, gpu_ms as f32, avg_ms as f32)
+                    "[perf] GPU memory at exit: {}",
+                    super::perf::gpu_memory_part(&r.gpu_memory(), device)
+                        .trim_start_matches("gpu mem ")
                 );
+            }
+            // That GPU total leaves out the scopes that read zero (#1316)
+            if n.gpu.is_some() {
+                if let Some(why) = self.gpu_timestamps_unusable() {
+                    tracing::warn!(target: "report",
+                        "[perf] {}: {why}, so the GPU total counts only the scopes that read",
+                        flint_render::TIMESTAMPS_UNAVAILABLE
+                    );
+                }
             }
         }
         // The run's hitches (#1079): a mean hides the one long frame. The
@@ -467,6 +521,8 @@ impl PlayerApp {
                 tracing::info!(target: "report", "{line}");
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.write_perf_report(numbers.as_ref());
         for line in self.subsystem_report() {
             tracing::info!(target: "report", "{line}");
         }
@@ -492,7 +548,7 @@ impl PlayerApp {
     /// Single-shot: the first frame at or after `capture.at`. Interval mode:
     /// the first frame at or after `capture.at`, then every `every` seconds,
     /// numbered `<stem>_0001.<ext>`, `<stem>_0002.<ext>`, ...
-    fn capture_path_due(&mut self) -> Option<std::path::PathBuf> {
+    pub(super) fn capture_path_due(&mut self) -> Option<std::path::PathBuf> {
         let base = self.capture.path.clone()?;
         let now = self.core.clock.total_time;
         // Tolerance so `--screenshot-at` means the frame at that time: 210 steps of
@@ -532,7 +588,7 @@ impl PlayerApp {
         &self,
         texture: &wgpu::Texture,
         path: &std::path::Path,
-    ) -> Result<(), String> {
+    ) -> Result<super::ShotWritten, String> {
         let Some(context) = &self.render_context else {
             return Err("no render context".into());
         };
@@ -545,7 +601,19 @@ impl PlayerApp {
         let pixels = context
             .read_surface_rgba(texture)
             .map_err(|e| format!("read-back of {} failed: {e}", path.display()))?;
-        let img = image::RgbaImage::from_raw(texture.width(), texture.height(), pixels)
+        self.save_screenshot(pixels, texture.width(), texture.height(), path)
+    }
+
+    /// Save a frame's RGBA pixels as a PNG at `path`, its folder made: the
+    /// window's screenshots and a rendered playtest's (#1191).
+    pub(super) fn save_screenshot(
+        &self,
+        pixels: Vec<u8>,
+        width: u32,
+        height: u32,
+        path: &std::path::Path,
+    ) -> Result<super::ShotWritten, String> {
+        let img = image::RgbaImage::from_raw(width, height, pixels)
             .ok_or_else(|| format!("pixel buffer size mismatch for {}", path.display()))?;
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -555,14 +623,17 @@ impl PlayerApp {
         }
         img.save(path)
             .map_err(|e| format!("failed to save {}: {e}", path.display()))?;
+        let at = self.core.clock.total_time;
         tracing::info!(
-            "screenshot written: {} ({}x{} at t={:.2}s)",
+            "screenshot written: {} ({width}x{height} at t={at:.2}s)",
             path.display(),
-            texture.width(),
-            texture.height(),
-            self.core.clock.total_time
         );
-        Ok(())
+        Ok(super::ShotWritten {
+            path: path.to_path_buf(),
+            at,
+            width,
+            height,
+        })
     }
 
     pub(super) fn tick(&mut self) {
@@ -604,6 +675,12 @@ impl PlayerApp {
                 .clock_ticked(super::frame_history::ClockSample::of(&self.core.clock));
             self.stats.perf.game_time(self.core.clock.total_time);
             found = self.stats.hitches.observe(&self.stats.perf);
+            // `--perf-report`'s phase and script totals (#1093)
+            if let Some(report) = &mut self.stats.report {
+                report
+                    .totals
+                    .add_closed(&self.stats.perf, super::PERF_SKIP_SECS);
+            }
             // The hitch log, the exit report's counts and the gate (#1079)
             self.stats
                 .watch
@@ -637,12 +714,21 @@ impl PlayerApp {
         // egui first (ADR 0082, 0097), then the debug keys (H9) and InputState.
         // Its `expect` and `wait` lines (#714) ask the game as it stands
         // before this frame's step.
+        let drawn = self.capture.last_frame_time.is_some();
         if let Some(script) = &mut self.capture.input_script {
             flint_core::scope!("input_script");
             if self.core.event_log.is_none() && script.has_checks() {
                 self.core.event_log = Some(Vec::new());
             }
-            let probe = super::input_probe::CoreProbe(&self.core);
+            // The last frame drawn, for a `frame` line (#1191): the HUD's
+            // draw list and, once a frame has been drawn, its renderer
+            let probe = super::input_probe::CoreProbe {
+                core: &self.core,
+                frame: super::input_probe::FrameSeen {
+                    hud: &self.hud.draw_commands,
+                    renderer: self.scene_renderer.as_ref().filter(|_| drawn),
+                },
+            };
             let applied = script.apply_probed(self.core.clock.total_time, &mut self.input, &probe);
             for event in applied.events {
                 self.scripted_event(event);
@@ -738,7 +824,9 @@ impl PlayerApp {
             self.input.touch_controls_mut().set_enabled(enabled);
         }
 
-        // A quality setting moved the distance levers (#56).
+        // A script's set_lod_scale moved the distance levers (#56), which
+        // are the quality keys lod_scale and draw_distance_scale (#1149):
+        // the quality in force follows, so get_quality() reads them too.
         if let Some(renderer) = &mut self.scene_renderer {
             let lod = self.core.script_requests.lod_scale.take();
             let draw = self.core.script_requests.draw_distance_scale.take();
@@ -748,6 +836,9 @@ impl PlayerApp {
                 s.draw_distance_scale = draw.unwrap_or(s.draw_distance_scale);
                 renderer.set_lod_settings(s);
                 s = renderer.lod_settings();
+                self.quality.settings.lod_scale = s.lod_scale;
+                self.quality.settings.draw_distance_scale = s.draw_distance_scale;
+                self.core.script.set_quality_state(self.quality.settings);
             }
             self.core
                 .script
@@ -863,8 +954,13 @@ impl PlayerApp {
 
         // The frame's inputs, and the world read into the draw lists (#739)
         let ppp = self.renderer_pixels_per_point();
-        let (Some(renderer), Some(context)) = (&mut self.scene_renderer, &self.render_context)
-        else {
+        // The window's device, or a rendered playtest's (#1191)
+        let gpu = match (&self.render_context, self.offscreen) {
+            (Some(c), _) => (&c.device, &c.queue),
+            (None, Some(g)) => (&g.device, &g.queue),
+            (None, None) => return,
+        };
+        let Some(renderer) = &mut self.scene_renderer else {
             return;
         };
         let cam_pos = self.camera.position;
@@ -923,7 +1019,7 @@ impl PlayerApp {
                     &self.core.world,
                 ));
         }
-        renderer.prepare(&context.device, &context.queue, &self.core.world, &inputs);
+        renderer.prepare(gpu.0, gpu.1, &self.core.world, &inputs);
         // Next frame's scripts cast against what this one draws (ADR 0105).
         self.core.script.set_ray_scene(renderer.ray_scene());
     }
@@ -949,7 +1045,11 @@ impl PlayerApp {
         self.post.take_from(&mut self.core.script_requests);
     }
 
-    fn render_hud(&mut self, target_view: &wgpu::TextureView, encoder: &mut wgpu::CommandEncoder) {
+    pub(super) fn render_hud(
+        &mut self,
+        target_view: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
         flint_core::scope!("render_hud");
         // The first pass to draw an F2 view lays out what it shows and
         // uploads the glyphs that takes: the pass is timed as a note, so a
@@ -972,15 +1072,27 @@ impl PlayerApp {
         // The F1 card's table (#717), while the subsystems are here to ask
         let key_table = self.hud.key_table_open.then(|| self.debug_key_table());
 
-        let Some(window) = &self.window else { return };
-        let Some(context) = &self.render_context else {
+        // The window's target, or a rendered playtest's (#1191), which has
+        // no window: egui's input is then the target's size and no events
+        let Some(target) = HudTarget::of(self.render_context.as_ref(), self.offscreen) else {
             return;
         };
-        let Some(egui_winit) = &mut self.hud.egui_winit else {
-            return;
+        let window = self.window.as_ref();
+        let mut egui_winit = match window {
+            Some(_) => match self.hud.egui_winit.as_mut() {
+                Some(state) => Some(state),
+                None => return,
+            },
+            None => None,
         };
 
-        let mut raw_input = egui_winit.take_egui_input(window);
+        let mut raw_input = match (&mut egui_winit, window) {
+            (Some(state), Some(window)) => state.take_egui_input(window),
+            _ => super::offscreen::raw_input(
+                target.size,
+                self.launch.pixels_per_point.unwrap_or(1.0),
+            ),
+        };
         // Under --frame-step egui runs on the game clock too (#435): its
         // animations (a header opening, a tooltip fading) would otherwise
         // follow the wall clock, and a slow capture frame would land them
@@ -1015,8 +1127,8 @@ impl PlayerApp {
             view_proj: self.camera.view_projection_matrix(),
             eye: self.camera.position_array(),
             screen: [
-                context.config.width as f32 / self.hud.egui_ctx.pixels_per_point(),
-                context.config.height as f32 / self.hud.egui_ctx.pixels_per_point(),
+                target.size[0] as f32 / self.hud.egui_ctx.pixels_per_point(),
+                target.size[1] as f32 / self.hud.egui_ctx.pixels_per_point(),
             ],
             px_per_point: self.hud.egui_ctx.pixels_per_point(),
         });
@@ -1029,7 +1141,7 @@ impl PlayerApp {
         let show_stats = stats_view == super::StatsView::Full;
         // The adapter, and on DX12 its shader compiler (#912)
         let gpu_label = if show_stats {
-            flint_render::gpu_select::adapter_short(&context.adapter.get_info())
+            flint_render::gpu_select::adapter_short(&target.adapter_info())
         } else {
             String::new()
         };
@@ -1047,12 +1159,24 @@ impl PlayerApp {
                 stats.frame_time_ms = (avg_dt * 1000.0) as f32;
                 if let Some(ctx) = &self.render_context {
                     stats.resolution = [ctx.config.width, ctx.config.height];
+                    stats.device_memory = flint_render::gpu_counts::device_memory(&ctx.device);
+                }
+                // A frame that made GPU objects is one frame of the
+                // overlay: keep it, so the row can say it (#1091)
+                if stats.gpu_calls.created() > 0 {
+                    self.stats.last_gpu_objects =
+                        Some((self.core.clock.total_time, stats.gpu_calls));
                 }
                 stats
             })
         } else {
             None
         };
+        let last_gpu_objects = self
+            .stats
+            .last_gpu_objects
+            .filter(|_| show_stats)
+            .map(|(at, calls)| (self.core.clock.total_time - at, calls));
         // Each style texture's row (#561), only while the full overlay
         // shows: closed, nothing is read or allocated
         let style_target_rows = match (&stats_data, self.scene_renderer.as_ref()) {
@@ -1069,7 +1193,7 @@ impl PlayerApp {
         let mut graph = self.stats.overlay_graph(|| {
             // The display's refresh: the budget line
             clock.vsync_period().or_else(|| {
-                let mhz = window.current_monitor()?.refresh_rate_millihertz()?;
+                let mhz = window?.current_monitor()?.refresh_rate_millihertz()?;
                 (mhz > 0).then(|| 1000.0 / mhz as f64)
             })
         });
@@ -1088,6 +1212,9 @@ impl PlayerApp {
         // The registry they came from, for the card's "doesn't load" (#742)
         #[cfg(feature = "debug-hud")]
         let style_registry = self.core.styles.clone();
+        // What a style's cap left out since the scene loaded (#740, #1246)
+        #[cfg(feature = "debug-hud")]
+        let style_drops = flint_render::stylize::variant_table::dropped();
         // Scripts that fail (#693), each once with its count, until the
         // file is saved again or the scene changes
         #[cfg(feature = "debug-hud")]
@@ -1167,6 +1294,7 @@ impl PlayerApp {
                     (super::StatsView::Full, Some(stats)) => render_stats_overlay(
                         ctx,
                         stats,
+                        last_gpu_objects,
                         &style_target_rows,
                         &gpu_label,
                         graph.as_mut(),
@@ -1194,19 +1322,21 @@ impl PlayerApp {
                     } else {
                         0.0
                     };
-                    // The script card in the corner, the style card above it
+                    // The script card in the corner, the style card above
+                    // it, and what a style's cap left out above that
                     let scripts = flint_debug_ui::paint_script_errors(
                         ctx,
                         &script_errors,
                         script_errors_unkept,
                         inset,
                     );
-                    flint_debug_ui::paint_style_errors(
+                    let styles = flint_debug_ui::paint_style_errors(
                         ctx,
                         &style_errors,
                         &style_registry,
                         inset + scripts,
                     );
+                    flint_debug_ui::paint_style_drops(ctx, &style_drops, inset + scripts + styles);
                 }
             });
             full_output
@@ -1224,7 +1354,9 @@ impl PlayerApp {
             .egui_fonts_ready
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        egui_winit.handle_platform_output(window, full_output.platform_output);
+        if let (Some(state), Some(window)) = (egui_winit, window) {
+            state.handle_platform_output(window, full_output.platform_output);
+        }
 
         let (paint_jobs, glyphs) = {
             flint_core::scope!("egui_tessellate");
@@ -1239,31 +1371,38 @@ impl PlayerApp {
         };
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [context.config.width, context.config.height],
+            size_in_pixels: target.size,
             pixels_per_point: full_output.pixels_per_point,
         };
 
         let mut egui_renderer = self.hud.egui_renderer.take().unwrap();
 
+        // A pass knob may skip the HUD's drawing (#1317); it blends over
+        // the frame, so it never repeats
+        let ui_times = self.scene_renderer.as_mut().map_or(1, |r| {
+            r.pass_times("UI", Some(flint_render::pass_knobs::DRAWS_OVER_THE_FRAME))
+        });
         // The HUD's GPU time, with the renderer's phases (ADR 0108), and its
         // debug group for GPU debuggers (#1083).
-        let ui_scope = flint_render::gpu_labels::begin(
-            self.scene_renderer.as_mut().and_then(|r| r.gpu_timer_mut()),
-            encoder,
-            "UI",
-        );
+        let ui_scope = (ui_times > 0).then(|| {
+            flint_render::gpu_labels::begin(
+                self.scene_renderer.as_mut().and_then(|r| r.gpu_timer_mut()),
+                encoder,
+                "UI",
+            )
+        });
 
         {
             flint_core::scope!("egui_upload", paint_jobs.len());
             for (id, deltas) in &full_output.textures_delta.set {
                 for image_delta in deltas {
-                    egui_renderer.update_texture(&context.device, &context.queue, *id, image_delta);
+                    egui_renderer.update_texture(target.device, target.queue, *id, image_delta);
                 }
             }
 
             egui_renderer.update_buffers(
-                &context.device,
-                &context.queue,
+                target.device,
+                target.queue,
                 encoder,
                 &paint_jobs,
                 &screen_descriptor,
@@ -1271,22 +1410,22 @@ impl PlayerApp {
         }
 
         // World text goes under the HUD, against the scene's depth.
-        if !glyphs.is_empty() {
+        if !glyphs.is_empty() && ui_scope.is_some() {
             let pipeline = self.hud.world_text_pipeline.get_or_insert_with(|| {
-                super::world_text::WorldTextPipeline::new(&context.device, context.hud_format)
+                super::world_text::WorldTextPipeline::new(target.device, target.hud_format)
             });
             pipeline.draw(
-                &context.device,
-                &context.queue,
+                target.device,
+                target.queue,
                 encoder,
                 target_view,
-                &context.depth_view,
+                target.depth_view,
                 &glyphs,
                 &egui_renderer,
             );
         }
 
-        {
+        if ui_scope.is_some() {
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("HUD Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1309,11 +1448,13 @@ impl PlayerApp {
             egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
         }
 
-        flint_render::gpu_labels::end(
-            self.scene_renderer.as_mut().and_then(|r| r.gpu_timer_mut()),
-            encoder,
-            ui_scope,
-        );
+        if let Some(ui_scope) = ui_scope {
+            flint_render::gpu_labels::end(
+                self.scene_renderer.as_mut().and_then(|r| r.gpu_timer_mut()),
+                encoder,
+                ui_scope,
+            );
+        }
 
         for id in &full_output.textures_delta.free {
             egui_renderer.free_texture(id);
@@ -1345,19 +1486,14 @@ impl PlayerApp {
             if !ocean_panel.probe_shown() {
                 continue;
             }
-            let Some(ocean) = self
-                .core
-                .world
-                .get_id(ocean_panel.entity_name())
-                .and_then(|id| {
-                    self.core
-                        .world
-                        .get_component(id, flint_geometry::components::OCEAN)
-                })
-            else {
+            let Some(id) = self.core.world.get_id(ocean_panel.entity_name()) else {
                 continue;
             };
-            let lines = ocean_panel.probe_lines(ocean, time, camera_pos, forward);
+            let ocean = self.core.world.view(id, flint_geometry::components::OCEAN);
+            if !ocean.exists() {
+                continue;
+            }
+            let lines = ocean_panel.probe_lines(&ocean, time, camera_pos, forward);
             self.hud.world_lines.extend(lines);
         }
     }
@@ -1471,6 +1607,9 @@ impl super::game_core::FrameHost for PlayerApp {
         // paused or not: loops play on under a pause menu.
         self.audio.sample_positions();
         script.set_audio_clock(self.audio.sync.positions(), self.audio.output_latency());
+        // And which of the sounds scripts started still play (#1000): a
+        // command from last frame's batch is in the engine by now
+        script.set_sounds_playing(self.audio.engine.playing_keys());
         // The music clock and the conducted snapshot are the music
         // subsystem's, set at `Stage::PreScripts`, just before this
     }
@@ -1552,6 +1691,10 @@ impl super::game_core::FrameHost for PlayerApp {
                 .update(&mut self.core.world, self.core.clock.delta_time)
                 .ok();
         }
+    }
+
+    fn late_models(&mut self) {
+        self.load_late_models();
     }
 
     fn bones_posed(&mut self) {
@@ -1672,6 +1815,7 @@ fn render_graph_overlay(ctx: &egui::Context, graph: Option<&mut OverlayGraph>, r
 fn render_stats_overlay(
     ctx: &egui::Context,
     stats: &flint_render::RenderStats,
+    last_gpu_objects: Option<(f64, flint_render::gpu_counts::GpuCalls)>,
     style_targets: &[String],
     gpu: &str,
     graph: Option<&mut OverlayGraph>,
@@ -1714,6 +1858,19 @@ fn render_stats_overlay(
             });
             ui.label(format!("Draw Calls: {}", stats.draw_calls));
             ui.label(format!("Triangles: {}", format_count(stats.triangles)));
+
+            ui.separator();
+
+            // GPU objects created this frame (#1091): zero on a steady
+            // frame, amber when not, and the last frame that made any
+            for row in super::stats_view::gpu_alloc_rows(stats, last_gpu_objects) {
+                let color = match row.tone {
+                    super::stats_view::Tone::Calm => egui::Color32::from_gray(200),
+                    super::stats_view::Tone::Quiet => egui::Color32::from_gray(136),
+                    super::stats_view::Tone::Alert => egui::Color32::from_rgb(245, 166, 35),
+                };
+                ui.colored_label(color, row.text);
+            }
 
             ui.separator();
 
@@ -1786,7 +1943,12 @@ fn render_stats_overlay(
             ui.colored_label(egui::Color32::from_gray(170), gpu);
 
             // GPU time per phase (ADR 0108), where the device can time
-            if !stats.gpu_passes.is_empty() {
+            if let (true, Some(why)) = (!stats.gpu_passes.is_empty(), stats.gpu_timestamps.why()) {
+                // Zeros that look like an answer are worse than none (#1316)
+                ui.label(flint_render::TIMESTAMPS_UNAVAILABLE);
+                ui.colored_label(egui::Color32::from_gray(170), format!("  {why}"));
+                ui.separator();
+            } else if !stats.gpu_passes.is_empty() {
                 ui.label(format!("GPU: {:.2}ms", stats.gpu_frame_ms));
                 for pass in &stats.gpu_passes {
                     ui.colored_label(

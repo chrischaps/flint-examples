@@ -1,6 +1,7 @@
 //! Headless rendering context for offscreen render-to-image
 
 use crate::context::RenderError;
+use crate::gpu_counts::CountedDevice;
 
 /// Offscreen wgpu context that renders to a texture instead of a window surface
 pub struct HeadlessContext {
@@ -21,6 +22,18 @@ pub struct HeadlessContext {
 impl HeadlessContext {
     /// Create a new headless rendering context with the given dimensions
     pub async fn new(width: u32, height: u32) -> Result<Self, RenderError> {
+        Self::with_features(width, height, wgpu::Features::empty()).await
+    }
+
+    /// [`new`](Self::new), also asking for `extra` features where the
+    /// adapter has them (#1203: a replay's draw times want timestamps
+    /// inside passes). The device gets what the adapter offers of them;
+    /// ask `device.features()` what it got.
+    pub async fn with_features(
+        width: u32,
+        height: u32,
+        extra: wgpu::Features,
+    ) -> Result<Self, RenderError> {
         let instance = crate::gpu_select::instance();
 
         let adapter = crate::gpu_select::request_adapter(&instance, None)
@@ -32,7 +45,7 @@ impl HeadlessContext {
                 label: Some("Flint Headless Device"),
                 // Timestamps where the adapter has them, so the
                 // renderer's GPU timing can be turned on (ADR 0108).
-                required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
+                required_features: adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | extra),
                 required_limits: wgpu::Limits::default(),
                 memory_hints: Default::default(),
                 ..Default::default()
@@ -97,7 +110,7 @@ impl HeadlessContext {
             height,
             depth_or_array_layers: 1,
         };
-        let color_texture = device.create_texture(&wgpu::TextureDescriptor {
+        let color_texture = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some("Headless Color Texture"),
             size,
             mip_level_count: 1,
@@ -110,7 +123,7 @@ impl HeadlessContext {
             view_formats: &[format.remove_srgb_suffix()],
         });
         let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
+        let depth_texture = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some("Headless Depth Texture"),
             size,
             mip_level_count: 1,
@@ -135,7 +148,7 @@ impl HeadlessContext {
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
 
         let buffer_size = (padded_bytes_per_row * self.height) as u64;
-        let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let staging_buffer = self.device.create_buffer_counted(&wgpu::BufferDescriptor {
             label: Some("Pixel Readback Buffer"),
             size: buffer_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,

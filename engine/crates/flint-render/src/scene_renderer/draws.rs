@@ -43,7 +43,7 @@ impl SceneRenderer {
         let entry = cache.draws.entry(key).or_insert_with(|| {
             let (slot, page) = arena.alloc(device);
             arena.stage(slot, bytemuck::bytes_of(transform_uniforms));
-            let tbg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let tbg = device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 layout: &layouts.transform_bind_group_layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 0,
@@ -119,16 +119,18 @@ impl SceneRenderer {
     ) -> &'a CachedBoxMesh {
         cache.entry(key).or_insert_with(|| {
             let mesh = build();
-            let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Box Vertex Buffer (cached)"),
-                contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Box Index Buffer (cached)"),
-                contents: bytemuck::cast_slice(&mesh.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
+            let vertex_buffer =
+                device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Box Vertex Buffer (cached)"),
+                    contents: bytemuck::cast_slice(&mesh.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let index_buffer =
+                device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Box Index Buffer (cached)"),
+                    contents: bytemuck::cast_slice(&mesh.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
             CachedBoxMesh {
                 vertex_buffer: Arc::new(vertex_buffer),
                 index_buffer: Arc::new(index_buffer),
@@ -169,13 +171,16 @@ impl SceneRenderer {
 
     /// The distance levers in force (#56).
     pub fn lod_settings(&self) -> LodSettings {
-        self.lod_settings
+        LodSettings::of(&self.quality)
     }
 
     /// Change the distance levers (#56): takes effect at the next
     /// `render_to`, no reload. Scales are clamped to
-    /// [`LodSettings::MIN_SCALE`] and non-finite values are ignored.
+    /// [`LodSettings::MIN_SCALE`] and non-finite values are ignored. They
+    /// are the quality settings' `lod_scale` and `draw_distance_scale`
+    /// (#1149), so [`quality`](Self::quality) reads them back.
     pub fn set_lod_settings(&mut self, settings: LodSettings) {
+        let old = self.lod_settings();
         let clamp = |v: f32, old: f32| {
             if v.is_finite() {
                 v.max(LodSettings::MIN_SCALE)
@@ -183,13 +188,9 @@ impl SceneRenderer {
                 old
             }
         };
-        self.lod_settings = LodSettings {
-            lod_scale: clamp(settings.lod_scale, self.lod_settings.lod_scale),
-            draw_distance_scale: clamp(
-                settings.draw_distance_scale,
-                self.lod_settings.draw_distance_scale,
-            ),
-        };
+        self.quality.lod_scale = clamp(settings.lod_scale, old.lod_scale);
+        self.quality.draw_distance_scale =
+            clamp(settings.draw_distance_scale, old.draw_distance_scale);
     }
 
     /// Draws set aside by the last `render_to` for their level of detail or
@@ -207,7 +208,7 @@ impl SceneRenderer {
         let LodSettings {
             lod_scale,
             draw_distance_scale,
-        } = self.lod_settings;
+        } = self.lod_settings();
         let mut culled = 0u32;
         for item in self.draws.iter_mut() {
             let lod = match &item.draw {
@@ -256,13 +257,13 @@ impl SceneRenderer {
         material_uniforms: MaterialUniforms,
         texture_cache: &TextureCache,
     ) -> DrawCall {
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let vertex_buffer = device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(&mesh.vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
-        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let index_buffer = device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
             label: Some("Index Buffer"),
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
@@ -299,7 +300,7 @@ impl SceneRenderer {
         layout: &wgpu::BindGroupLayout,
         bones: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
+        device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
             layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -314,13 +315,13 @@ impl SceneRenderer {
         layouts: &SceneLayouts,
         uniforms: &TransformUniforms,
     ) -> (wgpu::Buffer, wgpu::BindGroup) {
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let buffer = device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
             label: Some("Transform Uniform Buffer"),
             contents: bytemuck::cast_slice(&[*uniforms]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
             layout: &layouts.transform_bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
@@ -358,13 +359,13 @@ impl SceneRenderer {
         mr_view: &wgpu::TextureView,
         emissive_view: &wgpu::TextureView,
     ) -> (wgpu::Buffer, wgpu::BindGroup) {
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let buffer = device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
             label: Some("Material Uniform Buffer"),
             contents: bytemuck::cast_slice(&[*uniforms]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind_group = device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
             layout: &layouts.material_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {

@@ -6,6 +6,7 @@
 //! the history in them, carry on, and HDR-stage ones are remade at the
 //! scene's new size the next time they're asked for.
 
+use crate::gpu_counts::CountedDevice;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,6 +17,48 @@ pub struct StyleTexture {
     pub view: wgpu::TextureView,
     pub width: u32,
     pub height: u32,
+}
+
+/// The textures a style draws into that it holds itself, outside
+/// [`StyleTargets`] (#1161: ASCII's edge cells and their history, its tone
+/// statistics), noted as it draws them while a frame is captured, so the
+/// capture can read them after the style's part
+/// ([`StylePass::held_targets`](super::StylePass::held_targets)). Off,
+/// [`note`](Self::note) reads one flag.
+#[derive(Default)]
+pub struct HeldTargets {
+    recording: AtomicBool,
+    noted: Mutex<Vec<(&'static str, wgpu::Texture)>>,
+}
+
+impl HeldTargets {
+    /// `texture` holds what this part drew into the target `id` (a
+    /// description's target id: `<style>.<name>`). Note it after the pass
+    /// that writes it, and only on a frame that writes it, so a capture
+    /// never reads a texture left over from an earlier frame as this one's.
+    pub fn note(&self, id: &'static str, texture: &wgpu::Texture) {
+        if !self.recording.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut noted = self.noted.lock().unwrap_or_else(|e| e.into_inner());
+        match noted.iter_mut().find(|(n, _)| *n == id) {
+            Some(slot) => slot.1 = texture.clone(),
+            None => noted.push((id, texture.clone())),
+        }
+    }
+
+    /// Start noting: the capture is about to run the style's part.
+    pub(crate) fn begin(&self) {
+        self.noted.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        self.recording.store(true, Ordering::Relaxed);
+    }
+
+    /// Stop noting, and what was noted since [`begin`](Self::begin), in the
+    /// order first noted.
+    pub(crate) fn end(&self) -> Vec<(&'static str, wgpu::Texture)> {
+        self.recording.store(false, Ordering::Relaxed);
+        std::mem::take(&mut *self.noted.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 /// Textures by name and format, made on first use.
@@ -62,7 +105,7 @@ impl StyleTargets {
                 t.height
             );
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some(name),
             size: wgpu::Extent3d {
                 width,
@@ -75,8 +118,10 @@ impl StyleTargets {
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                // Copied out by a frame capture (#1085)
-                | wgpu::TextureUsages::COPY_SRC,
+                // Copied out by a frame capture (#1085), and a style's
+                // history written back in by its replay (#1136)
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

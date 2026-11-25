@@ -3,12 +3,14 @@
 //!
 //! These need a GPU adapter. Without one each test prints a note and passes.
 
+#![allow(clippy::disallowed_methods)] // the test's own targets and read-backs, not the renderer's, so uncounted (#1091)
+
 mod shared_gpu;
 
+use flint_core::field_frame::BoilFrame;
 use flint_ecs::FlintWorld;
 use flint_import::ImportedMaterial;
 use flint_render::{Camera, DebugMode, PostProcessConfig, RendererConfig, SceneRenderer, Vertex};
-use flint_wooze::BoilFrame;
 
 const SIZE: u32 = 128;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;

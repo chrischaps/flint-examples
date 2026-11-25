@@ -8,6 +8,7 @@ mod ocean_panel;
 mod particles_panel;
 mod render_panel;
 mod script_errors;
+mod style_drops;
 mod style_errors;
 mod styles_panel;
 mod styles_ui;
@@ -19,10 +20,10 @@ pub use grass_panel::GrassDebugPanel;
 pub use headless_frame::run_headless_frame;
 #[cfg(feature = "living")]
 pub use living_props_panel::{
-    pick_prop, Knob, KnobControl, KnobDesc, KnobFlags, KnobSection, KnobSources, KnobValue,
-    LivingAbState, LivingHealth, LivingKnobs, LivingPanelAction, LivingPanelState,
+    pick_prop, Knob, KnobControl, KnobDesc, KnobFlags, KnobPanel, KnobSection, KnobSources,
+    KnobValue, LivingAbState, LivingHealth, LivingKnobs, LivingPanelAction, LivingPanelState,
     LivingPickedState, LivingPropRow, LivingPropsDebugPanel, LivingSpeciesState, PanelScope,
-    LIVING_PROPS_DEBUG_PANEL,
+    KNOB_TABLE, LIVING_PROPS_DEBUG_PANEL,
 };
 pub use ocean_panel::{OceanDebugPanel, OceanPanelConfig};
 pub use particles_panel::{
@@ -30,6 +31,7 @@ pub use particles_panel::{
 };
 pub use render_panel::{RenderDebugPanel, RenderPanelFlags, RENDER_DEBUG_PANEL};
 pub use script_errors::{grouped, paint_script_errors, ScriptErrorRow};
+pub use style_drops::paint_style_drops;
 pub use style_errors::paint_style_errors;
 pub use styles_panel::{styled_entity_rows, StyledEntityRow, StylesDebugPanel, STYLES_DEBUG_PANEL};
 pub use styles_ui::{StylesEdit, StylesEditor};
@@ -168,7 +170,7 @@ mod column_tests {
         // A representative full roster in creation order, mixing engine
         // panels with game-supplied ones (which take the default weight).
         // Rendering & Effects, Ocean, then a game's component panels
-        // (Day / Time, Weather, Reality, Visitor, Dead Calm) and Camera.
+        // (Day / Time, Weather, Lantern, Fog Bank, Tide) and Camera.
         let weights = [60, 46, 10, 15, 20, 5, 6, 6];
         let cols = assign_columns(&weights, 3);
         assert_eq!(cols.len(), 3);

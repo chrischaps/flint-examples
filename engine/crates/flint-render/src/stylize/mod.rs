@@ -97,6 +97,7 @@ pub mod custom;
 pub mod dev_shader;
 pub mod edges;
 mod fade;
+pub mod history;
 pub mod images;
 pub mod kit;
 pub mod ownership;
@@ -115,7 +116,7 @@ pub use reveal::{RevealShape, StyleReveal};
 pub use spec::{
     apply_style_spec, apply_style_specs, check_style_specs, style_spec_help, StyleSpec,
 };
-pub use targets::{StyleTargets, StyleTexture, TargetEntry, TargetSummary};
+pub use targets::{HeldTargets, StyleTargets, StyleTexture, TargetEntry, TargetSummary};
 pub use text::{GlyphCell, GlyphText};
 
 use crate::bind_cache::BindCache;
@@ -197,6 +198,9 @@ pub fn is_builtin(name: &str) -> bool {
 pub(crate) fn registry_index(styles: &StyleRegistry, d: &StyleDescriptor) -> Option<usize> {
     styles.index_of(d.name)
 }
+
+#[cfg(test)]
+mod shared_wgsl_tests;
 
 #[cfg(test)]
 mod tests {

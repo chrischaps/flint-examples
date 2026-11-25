@@ -80,7 +80,7 @@ fn help(command: &str) -> String {
     String::from_utf8_lossy(&run.stdout).into_owned()
 }
 
-/// #327: `goldens` and `music render` (once `render-suite`) are two
+/// #327: `goldens` and `music render` (once both `render-suite`) are two
 /// commands, and each one's `--help` lists only its own flags.
 #[test]
 fn goldens_and_music_each_list_only_their_own_flags() {
@@ -130,34 +130,29 @@ fn goldens_and_music_each_list_only_their_own_flags() {
     assert!(music.contains("flint goldens"), "{music}");
 }
 
-/// #327: the old spelling, `render-suite <x>.goldens.toml` with golden
-/// flags, still runs the goldens. A case filter that matches nothing stops
-/// it before any GPU work, so this holds on any machine.
+/// #327: `goldens` takes a manifest with golden flags after it, and
+/// `music render` asks clap for its WAV. A case filter that matches nothing
+/// stops the goldens before any GPU work, so this holds on any machine.
 #[test]
-fn render_suite_still_runs_a_goldens_manifest() {
+fn goldens_takes_a_manifest_and_music_render_needs_its_wav() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/stylize.goldens.toml");
-    for command in ["render-suite", "goldens"] {
-        let run = Command::new(FLINT)
-            .arg(command)
-            .arg("--case")
-            .arg("no-case-is-named-this")
-            .arg(&manifest)
-            .output()
-            .expect("run flint");
-        let err = String::from_utf8_lossy(&run.stderr);
-        assert!(!run.status.success(), "{command}: {err}");
-        assert!(err.contains("no cases to run"), "{command}: {err}");
-    }
-    // A music suite still needs its WAV, now from clap, by either name
-    for command in [&["render-suite"][..], &["music", "render"]] {
-        let run = Command::new(FLINT)
-            .args(command)
-            .arg("x.suite.toml")
-            .output()
-            .expect("run flint");
-        let err = String::from_utf8_lossy(&run.stderr);
-        assert!(!run.status.success() && err.contains("--output"), "{err}");
-    }
+    let run = Command::new(FLINT)
+        .arg("goldens")
+        .arg("--case")
+        .arg("no-case-is-named-this")
+        .arg(&manifest)
+        .output()
+        .expect("run flint");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success(), "{err}");
+    assert!(err.contains("no cases to run"), "{err}");
+
+    let run = Command::new(FLINT)
+        .args(["music", "render", "x.suite.toml"])
+        .output()
+        .expect("run flint");
+    let err = String::from_utf8_lossy(&run.stderr);
+    assert!(!run.status.success() && err.contains("--output"), "{err}");
 }
 
 /// A user style that fails to compile (#417): `flint render` names its
@@ -223,7 +218,9 @@ fn style_flag_rejects_what_it_cannot_do() {
 /// stylize suite's own `ascii-motion-tone` case, its budget as checked in,
 /// run again with `hysteresis = 0`, must fail on its budget: so a budget
 /// loosened past what that regression measures (2.2 reversals a frame
-/// against 0.5) fails this test.
+/// against 0.5) fails this test. It draws 20 frames, not the case's 30:
+/// the mean a frame is the same at any count (2.39 at 20, 2.21 at 60), and
+/// on CI's WARP each frame is about 1.3 s beside the suite's own (#961).
 #[test]
 fn a_sequence_case_fails_when_the_history_stops_holding() {
     let manifest_path =
@@ -240,6 +237,7 @@ fn a_sequence_case_fails_when_the_history_stops_holding() {
         .unwrap()
         .clone();
     case.insert("name".into(), "ascii-motion-tone-no-hold".into());
+    case.insert("frames".into(), 20.into());
     let args = case.get_mut("args").unwrap().as_array_mut().unwrap();
     args.extend(["--style".into(), "ascii:hysteresis=0".into()]);
     let mut suite = manifest["suite"].as_table().unwrap().clone();

@@ -28,6 +28,15 @@
 //! it, and they are dropped when the scene unloads. Nothing of one scene's
 //! carries into the next.
 //!
+//! **Captures.** `flint render --scripts` builds its scene's subsystems from
+//! the same list (#1252): `HeadlessGame::start_subsystems` hands each builder
+//! a [`SceneCtx`] whose `capture` says what the capture asked for, so a new
+//! file runs in a capture as it does in the player, with nothing else to
+//! edit. A builder that builds otherwise there (a grove posed at once, music
+//! on the game clock) asks `ctx.capture`; a subsystem that is the window's
+//! alone says so from [`Subsystem::presentation_only`], and the capture
+//! drops it and names it once in its notes.
+//!
 //! **Order.** Subsystems run in the order they were added. They are torn down
 //! the other way round, last added first, at a scene's unloading and when the
 //! player drops: [`Subsystems`] drops its members in that order itself, and is
@@ -144,9 +153,12 @@ pub(crate) struct SceneCtx<'a> {
     /// The styles the scene is drawn with (#742).
     pub styles: &'a flint_render::stylize::StyleRegistry,
     pub script: &'a mut ScriptSystem,
-    /// The procgen resolver, which holds the scene's living props.
+    /// The procgen resolver, whose specs the scene's living props grow from.
     #[cfg(feature = "procgen")]
     pub resolver: &'a mut ProcGenResolver,
+    /// The scene's living props, added by its load.
+    #[cfg(feature = "living")]
+    pub living: &'a mut flint_living::LivingProps,
     /// `None` in a headless test.
     pub renderer: Option<&'a mut SceneRenderer>,
     /// The sound, when the host has it: a subsystem that plays on the
@@ -154,6 +166,9 @@ pub(crate) struct SceneCtx<'a> {
     pub audio: Option<&'a mut AudioEngine>,
     /// The pads, when the host has them.
     pub pads: Option<Pads<'a>>,
+    /// `Some` when the host is a capture (`flint render`'s `HeadlessGame`,
+    /// #1252): what it asked for. The player's is `None`.
+    pub capture: Option<&'a mut super::headless_game::CaptureStart>,
 }
 
 /// The host's pads, lent to a subsystem that reads them its own way (the
@@ -206,10 +221,13 @@ pub(crate) struct StageCtx<'a> {
     pub renderer: Option<&'a mut SceneRenderer>,
     /// The device and queue, when there is a window.
     pub gpu: Option<(&'a wgpu::Device, &'a wgpu::Queue)>,
-    /// The procgen resolver, which holds the scene's living props and makes
-    /// their poses on its frame budget.
+    /// The procgen resolver, which lends the living props its generators and
+    /// what its queue left of the frame budget.
     #[cfg(feature = "procgen")]
     pub resolver: &'a mut ProcGenResolver,
+    /// The scene's living props (flint-living, #1024).
+    #[cfg(feature = "living")]
+    pub living: &'a mut flint_living::LivingProps,
     pub project: &'a Project,
     pub scene_path: &'a str,
     /// Whether the scene file may be written (#364).
@@ -273,8 +291,8 @@ pub(crate) struct EncodeCtx<'a> {
     pub renderer: &'a mut SceneRenderer,
     pub world: &'a FlintWorld,
     pub camera: &'a Camera,
-    #[cfg(feature = "procgen")]
-    pub resolver: &'a mut ProcGenResolver,
+    #[cfg(feature = "living")]
+    pub living: &'a mut flint_living::LivingProps,
 }
 
 /// What a subsystem may read for the `--exit-after` report.
@@ -282,6 +300,8 @@ pub(crate) struct EncodeCtx<'a> {
 pub(crate) struct ReportCtx<'a> {
     #[cfg(feature = "procgen")]
     pub resolver: &'a ProcGenResolver,
+    #[cfg(feature = "living")]
+    pub living: &'a flint_living::LivingProps,
     pub renderer: Option<&'a SceneRenderer>,
 }
 
@@ -413,6 +433,24 @@ pub(crate) trait Subsystem: Any {
 
     /// The end of an `--exit-after` run.
     fn exit_report(&self, _ctx: &ReportCtx, _report: &mut ExitReport) {}
+
+    /// Why a capture (`flint render --scripts`) leaves it out, for a
+    /// subsystem that is the window's alone; `None`, the default, runs it
+    /// there as in the player (#1252). A capture asks once it is built for
+    /// the scene, so it names only what the scene would have had.
+    fn presentation_only(&self) -> Option<&'static str> {
+        None
+    }
+}
+
+/// Every scene subsystem `ctx`'s scene uses, built by the files'
+/// `for_scene` builders in file-name order: the player's list and a
+/// capture's alike.
+pub(crate) fn build_for_scene(ctx: &mut SceneCtx) -> Vec<Box<dyn Subsystem>> {
+    for_scene_builders()
+        .into_iter()
+        .filter_map(|build| build(ctx))
+        .collect()
 }
 
 /// The player's subsystems, in the order they were added, torn down in the
@@ -582,6 +620,8 @@ macro_rules! stage_ctx {
             gpu: $app.render_context.as_ref().map(|c| (&c.device, &c.queue)),
             #[cfg(feature = "procgen")]
             resolver: &mut $app.core.procgen_resolver,
+            #[cfg(feature = "living")]
+            living: &mut $app.core.living_props,
             project: &$app.core.project,
             scene_path: &$app.core.scene_path,
             scene_file_writable: $app.launch.scene_file_writable,
@@ -618,6 +658,8 @@ macro_rules! scene_ctx {
             script: &mut $app.core.script,
             #[cfg(feature = "procgen")]
             resolver: &mut $app.core.procgen_resolver,
+            #[cfg(feature = "living")]
+            living: &mut $app.core.living_props,
             renderer: $app.scene_renderer.as_mut(),
             audio: Some(&mut $app.audio.engine),
             pads: Some($crate::player_app::subsystem::Pads {
@@ -625,6 +667,7 @@ macro_rules! scene_ctx {
                 rumble: &mut $app.pad_rumble,
                 lent: &mut $app.pads_lent,
             }),
+            capture: None,
         }
     };
 }
@@ -660,10 +703,8 @@ impl super::PlayerApp {
             }
         }
         let mut ctx = scene_ctx!(self);
-        for build in for_scene_builders() {
-            if let Some(subsystem) = build(&mut ctx) {
-                self.core.subsystems.push(subsystem);
-            }
+        for subsystem in build_for_scene(&mut ctx) {
+            self.core.subsystems.push(subsystem);
         }
         self.core.enable_script_modules();
     }
@@ -723,6 +764,8 @@ impl super::PlayerApp {
         let ctx = ReportCtx {
             #[cfg(feature = "procgen")]
             resolver: &self.core.procgen_resolver,
+            #[cfg(feature = "living")]
+            living: &self.core.living_props,
             renderer: self.scene_renderer.as_ref(),
         };
         self.core.subsystems.exit_report(&ctx, &mut report);

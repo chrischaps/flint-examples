@@ -34,6 +34,19 @@ pub fn load_scene<P: AsRef<Path>>(
     Ok((world, scene_file))
 }
 
+/// What a host says when the scene at `path` didn't load (#1044):
+/// `Failed to load scene levels/hall.scene.toml`, the error's cause under
+/// it. A load's own errors mostly name entities, not the file (a parent
+/// cycle, a missing prefab), so with a folder of scenes or a sweep of
+/// variants this line is the one that says which file to open. Every
+/// command, the player and the editor word it the same way.
+pub fn load_failed<P: AsRef<Path>>(path: P) -> String {
+    format!(
+        "Failed to load scene {}",
+        flint_core::project::shown(path.as_ref())
+    )
+}
+
 /// [`load_scene`] into a world whose ids start past every id `previous`
 /// gave out ([`FlintWorld::after`]): what a host that goes on loads its
 /// next scene with (a transition, an editor's reload), so no id held across
@@ -121,19 +134,69 @@ fn load_text_into(
 
     // Expand prefab instances into entities before building world
     prefab::expand_prefabs(&mut scene_file, path)?;
-    let found = load_diagnostics(&scene_file, path, registry);
+    let found = load_diagnostics(&scene_file, content, path, registry);
     populate_world(&mut world, &scene_file, registry)?;
     Ok((world, scene_file, found))
 }
 
-/// What a load says of a scene it parsed: [`diagnose_scene_in`], less what
-/// the project allows. Not promoted by `[project] strict` (see
-/// [`load_scene`]).
-fn load_diagnostics(scene: &SceneFile, path: &Path, registry: &SchemaRegistry) -> Vec<Diagnostic> {
+/// What a load says of a scene it parsed from `content`:
+/// [`diagnose_scene_in`], less what the project allows, a scene table's
+/// mistakes placed by line and column (#1061). Not promoted by `[project]
+/// strict` (see [`load_scene`]).
+fn load_diagnostics(
+    scene: &SceneFile,
+    content: &str,
+    path: &Path,
+    registry: &SchemaRegistry,
+) -> Vec<Diagnostic> {
     let project = Project::for_scene(path);
     let mut found = diagnose_scene_in(scene, path, registry, &project);
     diagnostic::drop_allowed(&mut found, &project.allow);
+    leave_user_style_components(&mut found, &project, path);
+    crate::place_table_diagnostics(content, &mut found);
     found
+}
+
+/// Drop the `unknown-component` of each `<name>_style` that a user style
+/// the scene can see owns (`styles/<name>.shader.toml`, #414). Such a
+/// component has no schema file. Its schema is made from the style's
+/// `.shader.toml` when the style loads, and that happens after the scene
+/// loads, so the loader can't judge it. The host that draws the scene
+/// judges it once its styles are loaded (`bind_scene`'s
+/// `user_style_component_warnings`, #556), field by field. Saying it here
+/// too called the style's own component unknown, as an error, and asked for
+/// a schema file the book never asks for (#1320). `flint check` and
+/// `flint validate` don't come through here: they load the styles first and
+/// check against the schemas the styles make.
+fn leave_user_style_components(found: &mut Vec<Diagnostic>, project: &Project, path: &Path) {
+    let style_of = |d: &Diagnostic| {
+        (d.code == diagnostic::codes::UNKNOWN_COMPONENT)
+            .then_some(d.component.as_deref())
+            .flatten()
+            .and_then(|component| component.strip_suffix("_style"))
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    };
+    if !found.iter().any(|d| style_of(d).is_some()) {
+        return;
+    }
+    let scene_dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut seen: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    found.retain(|d| {
+        let Some(name) = style_of(d) else {
+            return true;
+        };
+        let owned = *seen.entry(name.clone()).or_insert_with(|| {
+            project
+                .explain(flint_core::project::AssetKind::Styles, &name, scene_dir)
+                .found
+                .is_some()
+        });
+        !owned
+    });
 }
 
 /// Parse a scene's text. A file that isn't TOML, or isn't a scene, is an
@@ -232,7 +295,7 @@ pub fn reload_scene<P: AsRef<Path>>(
 
     // Expand prefab instances
     prefab::expand_prefabs(&mut scene_file, path)?;
-    let found = load_diagnostics(&scene_file, path, registry);
+    let found = load_diagnostics(&scene_file, &content, path, registry);
     diagnostic::log_summary(&flint_core::project::shown(path), &found);
 
     // Clear existing world

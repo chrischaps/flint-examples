@@ -75,9 +75,18 @@ pub struct GameCore {
     /// The renderer's config generation the scripts' style reader was
     /// last made from (#372).
     pub(crate) style_reader_generation: Option<u64>,
-    /// The procgen resolver, which holds the scene's living props.
+    /// The procgen resolver: the scene's specs and generators, and the
+    /// frame budget its queue lends the living props.
     #[cfg(feature = "procgen")]
     pub(crate) procgen_resolver: ProcGenResolver,
+    /// The triangles of procgen and runtime meshes, for the `mesh` and
+    /// `convex` colliders that name them (#1222; `collider_meshes.rs`)
+    pub(crate) collider_sources: super::collider_meshes::ColliderSources,
+    /// The scene's living props (flint-living, #1024), beside the resolver
+    /// that makes their poses: added at load, before the living subsystem
+    /// exists, and kept across scenes for their pose cache.
+    #[cfg(feature = "living")]
+    pub(crate) living_props: flint_living::LivingProps,
     /// What scripts asked of the frame (#697): the camera, post-processing,
     /// distance levers, cursor and touch, held from the command that asked
     /// to the step of the frame that applies each.
@@ -119,6 +128,9 @@ impl GameCore {
             style_reader_generation: None,
             #[cfg(feature = "procgen")]
             procgen_resolver: ProcGenResolver::new(),
+            collider_sources: Default::default(),
+            #[cfg(feature = "living")]
+            living_props: Default::default(),
             script_requests: Default::default(),
             commands_warned: Default::default(),
             fixed_steps: 0,
@@ -247,6 +259,11 @@ pub(crate) trait FrameHost {
     /// HUD's draw lists, world lines and world text) is the host's.
     fn script_ui_drawn(&mut self) {}
 
+    /// The scripts are done with the frame's world: the models of the
+    /// entities spawned since the last frame (a script's `spawn_entity`)
+    /// load, before animation and the renderer's sync see them (#1107).
+    fn late_models(&mut self) {}
+
     /// The frame's sound, before animation moves on: its triggers from the
     /// game events, and the sources' update.
     fn sound(&mut self, _policy: &StateConfig, _events: &[GameEvent]) {}
@@ -318,6 +335,13 @@ pub(crate) fn step<H: FrameHost + ?Sized>(host: &mut H) {
     let steps_physics = !host.capture();
     let moved = {
         let (core, lent) = host.lend();
+        // Triangles that came since the last frame (a procgen model the
+        // queue finished, a mesh an extension uploaded), for the bodies
+        // whose `mesh` or `convex` collider names them (#1222)
+        if steps_physics {
+            core.collider_sources
+                .refresh(&core.world, &mut core.physics, lent.renderer.as_deref());
+        }
         core.tick_fixed_physics(
             config,
             has_fps_player && steps_physics,
@@ -379,6 +403,7 @@ pub(crate) fn step<H: FrameHost + ?Sized>(host: &mut H) {
     host.script_ui_drawn();
     host.phase_done(Phase::ScriptUi);
     run_stage(host, Stage::ScriptUi, Some(config));
+    host.late_models();
 
     // Sound triggers, animations + sprite-end callbacks, bone matrices,
     // bone probes, IK, particles
@@ -447,6 +472,8 @@ impl GameCore {
             gpu: lent.gpu,
             #[cfg(feature = "procgen")]
             resolver: &mut self.procgen_resolver,
+            #[cfg(feature = "living")]
+            living: &mut self.living_props,
             project: &self.project,
             scene_path: &self.scene_path,
             scene_file_writable: lent.scene_file_writable,
@@ -719,11 +746,15 @@ impl GameCore {
         // Whether the queue made anything is known only after: timed by
         // hand, noted (#1077) when it did
         let began = frame_notes::listening().then(web_time::Instant::now);
+        // A load's procgen stage too (#1092), forgotten when nothing came
+        let span =
+            flint_core::load_report::span(flint_core::load_report::Stage::Procgen, String::new);
         let completed = self
             .procgen_resolver
             .process_frame(lent.camera.position_array());
         let failures = self.procgen_resolver.take_failures();
         if completed.is_empty() && failures.is_empty() {
+            span.discard();
             return;
         }
         let detail = began.map(|_| procgen_note(&completed, failures.len()));
@@ -734,11 +765,16 @@ impl GameCore {
                 self.project.clone(),
                 &self.scene_path,
             );
-            let mut sink = super::procgen_assets::GpuSink {
+            let mut gpu = super::procgen_assets::GpuSink {
                 renderer,
                 device,
                 queue,
                 config: &config,
+            };
+            // Each mesh's triangles kept for the colliders naming it (#1222)
+            let mut sink = super::collider_meshes::Recording {
+                sink: &mut gpu,
+                sources: &mut self.collider_sources,
             };
             super::procgen_assets::apply_completed(&completed, &mut sink);
             super::procgen_assets::apply_failures(&failures, &mut sink);
@@ -829,9 +865,12 @@ pub(crate) fn for_the_host(command: &ScriptCommand) -> bool {
         | C::StopSound { .. }
         | C::SetSoundVolume { .. }
         | C::SetBusVolume { .. }
+        | C::SetUserBusVolume { .. }
+        | C::SetBusLowpass { .. }
         | C::Rumble { .. }
         | C::SetCameraCutDetection { .. }
         | C::SetLook { .. }
+        | C::PrepareLook { .. }
         | C::SetQuality { .. }
         | C::ResetPostStyle { .. }
         | C::LoadScene { .. }

@@ -18,8 +18,13 @@ pub(super) enum TransitionPhase {
     Idle,
     /// Playing exit transition — scripts draw fade-out visuals
     Exiting { target_scene: String, elapsed: f32 },
-    /// Loading the new scene (synchronous, happens in one frame)
-    Loading { target_scene: String },
+    /// Loading the new scene (synchronous, happens in one frame).
+    /// `covered`: a script ended the Exiting phase with
+    /// `complete_transition()`, so the load's long frame is drawn under its
+    /// fade and its hitch is counted as `loading` (#1125). A transition no
+    /// script covers (it goes straight through) or one the timeout ended
+    /// is not: the player may see the stall.
+    Loading { target_scene: String, covered: bool },
     /// Playing enter transition — scripts draw fade-in visuals
     Entering { elapsed: f32 },
 }
@@ -71,8 +76,11 @@ impl PlayerApp {
                 if over {
                     // Loaded this frame, as a script's complete_transition
                     // last frame would have it
+                    // No cover: nothing drew one, or nothing said it was
+                    // drawn
                     self.transition_phase = TransitionPhase::Loading {
                         target_scene: target,
+                        covered: false,
                     };
                     self.advance_transition();
                 } else {
@@ -82,8 +90,14 @@ impl PlayerApp {
                     };
                 }
             }
-            TransitionPhase::Loading { target_scene } => {
+            TransitionPhase::Loading {
+                target_scene,
+                covered,
+            } => {
                 let target = target_scene.clone();
+                if *covered {
+                    self.stats.perf.loading_behind_cover();
+                }
                 // Either way the scripts fade back in: over the new scene,
                 // or over this one when the next didn't load (#723)
                 self.execute_scene_transition(&target);
@@ -121,6 +135,12 @@ impl PlayerApp {
             return;
         }
         flint_core::scope!("load_chunk", chunk_id);
+        // A chunk streamed in has a table of its own, unless it arrives
+        // inside another load (a scene's on_init), which it is part of
+        let own_report = self.launch.load_report && !flint_core::load_report::recording();
+        if own_report {
+            self.begin_load_report(flint_core::load_report::LoadKind::Chunk, chunk_id);
+        }
         let _note =
             flint_core::frame_notes::begin(flint_core::frame_notes::NoteKind::ChunkLoad, || {
                 format!("{chunk_id} ({path})")
@@ -231,6 +251,10 @@ impl PlayerApp {
             .into_iter()
             .filter(|(id, _)| spawned_ids.contains(id))
             .collect();
+        // The chunk's models (#1107), after the colliders have asked for
+        // their triangles (a model of several nodes leaves its parent with
+        // no `model`) and inside the chunk's note and load report
+        self.load_late_models();
         self.prepare_physics(&collider_meshes);
         self.core
             .physics
@@ -300,6 +324,10 @@ impl PlayerApp {
             offset_y
         );
         self.loaded_chunks.insert(chunk_id.to_string(), spawned_ids);
+        if own_report {
+            flint_core::load_report::set_name(chunk_id);
+            flint_core::load_report::bring_up_done();
+        }
     }
 
     /// Unload a previously loaded chunk by despawning all its entities.
@@ -323,6 +351,8 @@ impl PlayerApp {
     /// (`run_failure`, #723). Returns whether the new scene was entered.
     pub(super) fn execute_scene_transition(&mut self, target_scene: &str) -> bool {
         flint_core::scope!("scene_transition", target_scene);
+        // Its load report, to the new scene's first frame (#1092)
+        self.begin_load_report(flint_core::load_report::LoadKind::Transition, target_scene);
         // One frame does all of it: a frame note (#1077), with the models,
         // textures, scripts and pipelines it loaded noted inside it
         let _note = flint_core::frame_notes::begin(
@@ -331,13 +361,21 @@ impl PlayerApp {
         );
         // The new scene's load summary counts from here (#716)
         self.begin_load_count();
-        let next = match self.read_scene(target_scene) {
+        let read =
+            flint_core::frame_notes::begin(flint_core::frame_notes::NoteKind::SceneRead, || {
+                target_scene.to_string()
+            });
+        let next = self.read_scene(target_scene);
+        drop(read);
+        let next = match next {
             Ok(next) => next,
             Err(e) => {
                 tracing::error!(target: "transition", "{e}; staying in {}", self.core.scene_path);
                 if self.outcome.scene_failure.is_none() {
                     self.outcome.scene_failure = Some(e);
                 }
+                // Nothing was loaded: no table for it
+                flint_core::load_report::abandon();
                 return false;
             }
         };
@@ -345,7 +383,11 @@ impl PlayerApp {
         // Teardown: scripts told, subsystems let go (the music's stems stop
         // BEFORE audio.clear(), ADR 0017's producer→handles→device order),
         // systems/world/terrain/transient render state cleared.
-        self.teardown_current_scene();
+        flint_core::frame_notes::timed(
+            flint_core::frame_notes::NoteKind::SceneTeardown,
+            String::new,
+            || self.teardown_current_scene(),
+        );
 
         // The outgoing scene's on_scene_exit has run: persist whatever it
         // (and the scene before it) stored, before the path changes.
@@ -383,6 +425,8 @@ impl PlayerApp {
         self.post.mode_shim.forget();
         // A look's fade eases toward this scene's config, not the next's
         self.style.look_fade = None;
+        // Its looks as read at its entry (#1159): the next scene reads its own
+        self.style.preloaded_looks.clear();
 
         // Clear all systems
         self.core.script.clear();

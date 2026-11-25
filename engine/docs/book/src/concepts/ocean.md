@@ -1,5 +1,7 @@
 # Ocean
 
+> **Package:** `engine`: every game has it. Its ocean render feature is grouped in the engine's manifest as the package it becomes in a later phase, with no switch yet ([Packages](packages.md)).
+
 Flint renders an endless, physically-grounded ocean: a sum of Gerstner waves
 shaped by a JONSWAP wind-sea spectrum, drawn on a camera-following grid and
 shaded in hard cel bands. The waves are believable — real dispersion, real
@@ -102,7 +104,7 @@ mask rather than a soft blend.
 | `foam_threshold` | Jacobian threshold — higher makes more foam. |
 | `foam_noise_scale` | World-space frequency of foam breakup. |
 | `ramp_steps` | Cel bands in the diffuse ramp (1–8). |
-| `specular_strength` | Sun glint. The glint is Fresnel-weighted, so it does not smear into a white disc under the camera. |
+| `specular_strength` | Sun glint, and each point and spot light's ([Lighting: Grass and water](lighting.md#grass-and-water)). The glint is Fresnel-weighted, so it does not smear into a white disc under the camera. |
 | `band_wobble` | Noise on the band contours. 0 gives razor edges; a little wobble stops them reading as machine-made. |
 | `band_dither` / `band_dither_scale` | Halftone dot transition at band edges, in dots per meter. |
 

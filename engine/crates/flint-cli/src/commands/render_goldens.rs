@@ -1,5 +1,5 @@
-//! `flint goldens <file>.goldens.toml` (#271, its own command since #327;
-//! the old `render-suite` given one still runs it): render a list of
+//! `flint goldens <file>.goldens.toml` (#271, its own command since #327,
+//! once `render-suite <file>.goldens.toml`): render a list of
 //! scenes with `flint render`, each with its own flags, and compare every
 //! image with a checked-in golden PNG. The suite fails when any case moves
 //! past its tolerance, so a change to the stylize framework (or anything
@@ -106,12 +106,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// `flint goldens <manifest>`: the manifest and the flags (#327). Its own
-/// command, so `--help` lists only what a golden suite takes; the old
-/// `render-suite` given a `.goldens.toml` is routed here before parsing
-/// ([`super::legacy_names::route`]).
+/// command, so `--help` lists only what a golden suite takes.
 #[derive(clap::Args, Debug)]
-#[command(after_help = "The old `flint render-suite <file>.goldens.toml` \
-    still runs this command, for one release.\nManifest format: `flint goldens` in the book \
+#[command(after_help = "Manifest format: `flint goldens` in the book \
     (guides/headless-rendering.md#golden-suites).")]
 pub struct GoldensArgs {
     /// The suite: a `.goldens.toml` of cases, each a scene and its
@@ -172,9 +169,9 @@ pub struct GoldenArgs {
     #[arg(long)]
     pub isolate: bool,
 
-    /// Build every case's pipelines anew, as before #911, instead of
-    /// keeping them for the next case on the device: for checking that
-    /// the reuse changes no pixel, in one process
+    /// Build every case's pipelines and upload its textures and meshes anew,
+    /// as before #911 and #961, instead of keeping them for the next case on
+    /// the device: for checking that the reuse changes no pixel, in one process
     #[arg(long)]
     pub fresh_pipelines: bool,
 }
@@ -639,7 +636,15 @@ enum Rendered {
 /// they took from an earlier case, and ASCII's glyph pipeline's own count,
 /// which was one a case before.
 fn pipeline_summary(kept: bool) -> String {
-    let counts = flint_render::pipeline_cache::counts();
+    let mut counts = flint_render::pipeline_cache::counts();
+    // The models' and files' textures and the meshes' buffers ride the
+    // same cache (#961), counted apart: uploads, not compiles
+    let textures = counts
+        .remove(flint_render::KEPT_TEXTURE_LABEL)
+        .unwrap_or_default();
+    let meshes = counts
+        .remove(flint_render::KEPT_GEOMETRY_LABEL)
+        .unwrap_or_default();
     let built: u64 = counts.values().map(|c| c.built).sum();
     let reused: u64 = counts.values().map(|c| c.reused).sum();
     let glyph = counts
@@ -648,10 +653,15 @@ fn pipeline_summary(kept: bool) -> String {
         .unwrap_or_default();
     format!(
         "pipelines: {built} built, {reused} reused from an earlier case{}; \
-         ASCII glyph pipeline built {}, reused {}",
+         ASCII glyph pipeline built {}, reused {}; \
+         textures: {} uploaded, {} reused; mesh buffers: {} uploaded, {} reused",
         if kept { "" } else { " (--fresh-pipelines)" },
         glyph.built,
-        glyph.reused
+        glyph.reused,
+        textures.built,
+        textures.reused,
+        meshes.built,
+        meshes.reused
     )
 }
 
@@ -724,7 +734,10 @@ fn render_in_process(
         std::iter::once(std::ffi::OsString::from("flint render")).chain(argv[1..].iter().cloned()),
     ) {
         Ok(cli) => cli,
-        Err(e) => return Ok(Rendered::Failed(e.to_string())),
+        Err(e) => {
+            let e = super::render_retired::explained(e, argv);
+            return Ok(Rendered::Failed(e.to_string()));
+        }
     };
     cli.args.command_line = argv[1..].to_vec();
     let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -866,8 +879,9 @@ pub fn run(manifest_path: &str, args: &GoldenArgs) -> Result<()> {
     flint_import::memoize_imports(!args.isolate);
     flint_render::memoize_mip_chains(!args.isolate);
     // And their pipelines (#911): compiling them again was most of a
-    // case's time. Only what nothing writes is kept, so no case sees
-    // another's state
+    // case's time. And their textures and mesh buffers (#961): on WARP
+    // uploading a props scene's was most of the rest. Only what nothing writes is kept, so
+    // no case sees another's state
     let keep_pipelines = !args.isolate && !args.fresh_pipelines;
     flint_render::pipeline_cache::set_enabled(keep_pipelines);
     flint_render::pipeline_cache::reset_counts();

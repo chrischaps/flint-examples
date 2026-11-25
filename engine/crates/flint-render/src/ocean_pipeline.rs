@@ -12,10 +12,10 @@
 //! grab-pass. Lakes and rivers draw with `body_pipeline`: the same shading
 //! on a supplied mesh (see `water_body.rs`).
 
+use crate::gpu_counts::CountedDevice;
 use crate::TrustedShader;
 use bytemuck::{Pod, Zeroable};
 use flint_geometry::ocean::MAX_WAVES;
-use wgpu::util::DeviceExt;
 
 /// Grid resolution (cells per side). 256 → 66k vertices, ~0.5 MB.
 pub const OCEAN_GRID_CELLS: u32 = 256;
@@ -121,10 +121,10 @@ pub const TINT_BELOW: u32 = 1;
 pub const TINT_KEEP_LIGHT: u32 = 2;
 
 /// A tint the sea's palette moves toward (#746): the `ocean` component's
-/// `tint*` fields, which a game drives (a sea turned to blood at dusk, the
-/// underside seen from a buried eye). It was render modes 2 and 5's remap,
-/// two looks of one game in the ocean shader; now it is one general
-/// recolour with named settings. Applied to the palette before any use, so
+/// `tint*` fields, which a game drives (a storm greying the sea, a dye
+/// spreading in pools, the surface seen from below). It was two looks of
+/// one game in the ocean shader; now it is one general recolour with named
+/// settings. Applied to the palette before any use, so
 /// bands, subsurface, foam and reflections agree, and after a script's
 /// palette lands, so it can't race one.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -152,16 +152,42 @@ pub struct OceanTint {
     pub below: bool,
 }
 
+/// The default sea's palette (bold flat blues per the stylized
+/// references): `OceanVisuals`' and so the `ocean` schema's defaults, and
+/// the palette a default tint moves toward.
+const SEA_DEEP: [f32; 4] = [0.055, 0.22, 0.53, 1.0];
+const SEA_SHALLOW: [f32; 4] = [0.16, 0.51, 0.83, 1.0];
+const SEA_FOAM: [f32; 4] = [0.96, 0.99, 1.0, 1.0];
+const SEA_SSS: [f32; 4] = [0.10, 0.75, 0.75, 1.0];
+
+const fn rgb(c: [f32; 4]) -> [f32; 3] {
+    [c[0], c[1], c[2]]
+}
+
 impl Default for OceanTint {
-    /// The crimson tide (Float's blood tear) at amount 0: off.
+    /// Off, and a palette that is the default sea's own: a tint names the
+    /// colours it moves toward, so one that names none changes nothing
+    /// however far it goes (#1041).
     fn default() -> Self {
-        Self::blood(0.0)
+        Self {
+            amount: 0.0,
+            deep: rgb(SEA_DEEP),
+            shallow: rgb(SEA_SHALLOW),
+            sss: rgb(SEA_SSS),
+            foam: rgb(SEA_FOAM),
+            sky: [1.0, 1.0, 1.0],
+            ramp_steps: 0.0,
+            band_wobble: 0.0,
+            pools: 0.0,
+            keep_light: false,
+            below: false,
+        }
     }
 }
 
 impl OceanTint {
-    /// The sea turned to blood (Float's render mode 2): pools that spread
-    /// with `amount`, night-dark, viscous (two wobbling bands).
+    /// A sea of blood: pools that spread with `amount`, night-dark,
+    /// viscous (two wobbling bands). One of the presets `tint_preset` names.
     pub fn blood(amount: f32) -> Self {
         Self {
             amount,
@@ -178,8 +204,9 @@ impl OceanTint {
         }
     }
 
-    /// The surface seen from under it (Float's render mode 5): murk blues
-    /// and flat white foam panes on the underside only, two bands.
+    /// The surface seen from under it: murk blues and flat white foam
+    /// panes on the underside only, two bands. One of the presets
+    /// `tint_preset` names.
     pub fn underside(amount: f32) -> Self {
         Self {
             amount,
@@ -196,25 +223,52 @@ impl OceanTint {
         }
     }
 
+    /// The presets `tint_preset` names, in the schema's order.
+    pub const PRESETS: [&'static str; 2] = ["blood", "underside"];
+
+    /// A preset by name at `amount`: `blood` or `underside` (#1035).
+    pub fn preset(name: &str, amount: f32) -> Option<Self> {
+        match name {
+            "blood" => Some(Self::blood(amount)),
+            "underside" => Some(Self::underside(amount)),
+            _ => None,
+        }
+    }
+
     /// The tint from an `ocean` component's `tint*` fields, each falling
-    /// back on the crimson tide's.
-    /// Read the `tint*` fields of an `ocean` component through the typed
-    /// view (ADR 0115): a wrong type reads as the default and is reported
-    /// once.
+    /// back on the preset `tint_preset` names, so a script switches between
+    /// two tints with one string (#1035) and a written field still wins
+    /// over its preset. With no preset (#1041) a tint names the colours it
+    /// moves toward: one it leaves out is the component's own (its
+    /// `deep_color`...) and every other setting changes nothing, so `tint`
+    /// alone moves the sea toward itself. Read through the typed view (ADR
+    /// 0115): a wrong type or an unknown preset reads as the default and is
+    /// reported once.
     pub fn from_component(view: &flint_ecs::ComponentView<'_>) -> Self {
-        let d = Self::default();
+        let preset = view
+            .opt_choice("tint_preset", &Self::PRESETS)
+            .and_then(|name| Self::preset(name, 0.0));
+        let d = preset.unwrap_or_default();
         let f = |name: &str, dv: f32| view.f32(name, dv);
         let c = |name: &str, dv: [f32; 3]| {
             let c = view.color(name, [dv[0], dv[1], dv[2], 1.0]);
             [c[0], c[1], c[2]]
         };
         let b = |name: &str, dv: bool| view.bool(name, dv);
+        // A preset names its colours; with none, the sea's own stand in
+        let own = |sea_field: &str, dv: [f32; 3]| {
+            if preset.is_some() {
+                dv
+            } else {
+                c(sea_field, dv)
+            }
+        };
         Self {
             amount: f("tint", d.amount).clamp(0.0, 1.0),
-            deep: c("tint_deep_color", d.deep),
-            shallow: c("tint_shallow_color", d.shallow),
-            sss: c("tint_sss_color", d.sss),
-            foam: c("tint_foam_color", d.foam),
+            deep: c("tint_deep_color", own("deep_color", d.deep)),
+            shallow: c("tint_shallow_color", own("shallow_color", d.shallow)),
+            sss: c("tint_sss_color", own("sss_color", d.sss)),
+            foam: c("tint_foam_color", own("foam_color", d.foam)),
             sky: c("tint_sky", d.sky),
             ramp_steps: f("tint_ramp_steps", d.ramp_steps).clamp(0.0, 8.0),
             band_wobble: f("tint_band_wobble", d.band_wobble).clamp(0.0, 1.0),
@@ -329,11 +383,10 @@ pub struct OceanVisuals {
 impl Default for OceanVisuals {
     fn default() -> Self {
         Self {
-            // Bold flat blues per the stylized references.
-            deep_color: [0.055, 0.22, 0.53, 1.0],
-            shallow_color: [0.16, 0.51, 0.83, 1.0],
-            foam_color: [0.96, 0.99, 1.0, 1.0],
-            sss_color: [0.10, 0.75, 0.75, 1.0],
+            deep_color: SEA_DEEP,
+            shallow_color: SEA_SHALLOW,
+            foam_color: SEA_FOAM,
+            sss_color: SEA_SSS,
             grid_scale: 60.0,
             fade_start: 90.0,
             fade_end: 170.0,
@@ -489,7 +542,7 @@ pub fn create_dummy_grab_texture(
     format: wgpu::TextureFormat,
     label: &str,
 ) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
+    device.create_texture_counted(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d {
             width: 1,
@@ -566,7 +619,7 @@ impl OceanPipeline {
 
         // The sea's grid and a body's mesh differ only in the vertex stage.
         let water_pipeline = |label: &str, entry: &str, buffer: wgpu::VertexBufferLayout| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
@@ -640,54 +693,57 @@ impl OceanPipeline {
             immediate_size: 0,
             label: Some("Grab Blit Pipeline Layout"),
         });
-        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Grab Blit Pipeline"),
-            layout: Some(&blit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &blit_shader,
-                entry_point: Some("vs_blit"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &blit_shader,
-                entry_point: Some("fs_blit"),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: crate::postprocess::HDR_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::R32Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: Default::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let blit_pipeline =
+            device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
+                label: Some("Grab Blit Pipeline"),
+                layout: Some(&blit_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &blit_shader,
+                    entry_point: Some("vs_blit"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &blit_shader,
+                    entry_point: Some("fs_blit"),
+                    targets: &[
+                        Some(wgpu::ColorTargetState {
+                            format: crate::postprocess::HDR_FORMAT,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::R32Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                    ],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
         let (vertices, indices) = generate_ocean_grid(OCEAN_GRID_CELLS);
-        let grid_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Ocean Grid Vertex Buffer"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        let grid_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Ocean Grid Index Buffer"),
-            contents: bytemuck::cast_slice(&indices),
-            usage: wgpu::BufferUsages::INDEX,
-        });
+        let grid_vertex_buffer =
+            device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
+                label: Some("Ocean Grid Vertex Buffer"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let grid_index_buffer =
+            device.create_buffer_init_counted(&wgpu::util::BufferInitDescriptor {
+                label: Some("Ocean Grid Index Buffer"),
+                contents: bytemuck::cast_slice(&indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
 
         Self {
             pipeline,
@@ -775,18 +831,35 @@ mod tests {
         assert_eq!(offset("hulls"), offset_of!(OceanUniformsGpu, hulls));
     }
 
-    /// #746: the component's `tint*` fields, each falling back on the
-    /// crimson tide's, and off with no `tint`.
+    /// #746: the component's `tint*` fields, and off with no `tint`. #1041:
+    /// a colour the tint leaves out is the sea's own, so a tint that names
+    /// none moves the sea toward itself.
     #[test]
     fn the_tint_reads_from_the_component() {
         let reports = flint_ecs::ReadReports::new();
         let view = |v| flint_ecs::ComponentView::of("sea", "ocean", Some(v), &reports);
         let none: toml::Value = toml::from_str("deep_color = [0.1, 0.2, 0.3, 1.0]").unwrap();
         let t = OceanTint::from_component(&view(&none));
-        assert_eq!(t, OceanTint::blood(0.0));
+        assert_eq!(t.amount, 0.0);
+        assert_eq!(t.deep, [0.1, 0.2, 0.3], "the sea's own deep colour");
         assert_eq!(t.to_gpu().0, 0.0, "off with no tint");
+
+        // `tint` alone: the sea's own palette, flat, no pools, the sky left
+        let alone: toml::Value = toml::from_str("tint = 0.5").unwrap();
+        let t = OceanTint::from_component(&view(&alone));
+        let sea = OceanVisuals::default();
+        assert_eq!(t.amount, 0.5);
+        assert_eq!(t.deep, sea.deep_color[..3]);
+        assert_eq!(t.shallow, sea.shallow_color[..3]);
+        assert_eq!(t.sss, sea.sss_color[..3]);
+        assert_eq!(t.foam, sea.foam_color[..3]);
+        assert_eq!(t.sky, [1.0; 3]);
+        assert_eq!((t.ramp_steps, t.band_wobble, t.pools), (0.0, 0.0, 0.0));
+        assert!(!t.keep_light && !t.below);
+
         let some: toml::Value = toml::from_str(
-            "tint = 0.6\ntint_deep_color = [0.0, 0.1, 0.0, 1.0]\ntint_pools = 0.0\ntint_below = true",
+            "tint = 0.6\ntint_deep_color = [0.0, 0.1, 0.0, 1.0]\ntint_ramp_steps = 2.0\n\
+             tint_keep_light = true\ntint_below = true",
         )
         .unwrap();
         let t = OceanTint::from_component(&view(&some));
@@ -804,7 +877,7 @@ mod tests {
         let wrong: toml::Value = toml::from_str("tint = \"red\"\ntint_below = 1").unwrap();
         for _ in 0..3 {
             let t = OceanTint::from_component(&view(&wrong));
-            assert_eq!(t, OceanTint::blood(0.0));
+            assert_eq!(t, OceanTint::default());
         }
         let fields: Vec<_> = reports
             .snapshot()
@@ -812,6 +885,92 @@ mod tests {
             .map(|d| d.field.unwrap())
             .collect();
         assert_eq!(fields, ["tint", "tint_below"]);
+    }
+
+    /// #1035: `tint_preset` picks the fields' fallbacks, and a written
+    /// field still wins. #1041: an unknown preset is no preset (the sea's
+    /// own palette, every setting neutral), said once.
+    #[test]
+    fn the_tint_preset_is_what_unwritten_fields_read() {
+        let reports = flint_ecs::ReadReports::new();
+        let view = |v| flint_ecs::ComponentView::of("sea", "ocean", Some(v), &reports);
+        let under: toml::Value = toml::from_str("tint_preset = \"underside\"\ntint = 0.8").unwrap();
+        assert_eq!(
+            OceanTint::from_component(&view(&under)),
+            OceanTint::underside(0.8)
+        );
+        let blood: toml::Value = toml::from_str("tint_preset = \"blood\"\ntint = 0.3").unwrap();
+        assert_eq!(
+            OceanTint::from_component(&view(&blood)),
+            OceanTint::blood(0.3)
+        );
+        let mixed: toml::Value =
+            toml::from_str("tint_preset = \"underside\"\ntint = 1.0\ntint_pools = 0.5").unwrap();
+        let t = OceanTint::from_component(&view(&mixed));
+        assert_eq!(t.pools, 0.5, "a written field wins");
+        assert_eq!(t.deep, OceanTint::underside(1.0).deep);
+        assert!(t.below);
+        assert!(reports.is_empty());
+        for name in OceanTint::PRESETS {
+            assert!(OceanTint::preset(name, 1.0).is_some(), "{name}");
+        }
+
+        let wrong: toml::Value = toml::from_str("tint_preset = \"bloood\"").unwrap();
+        assert_eq!(
+            OceanTint::from_component(&view(&wrong)),
+            OceanTint::default()
+        );
+        let said = reports.snapshot();
+        assert_eq!(said.len(), 1);
+        assert_eq!(said[0].field.as_deref(), Some("tint_preset"));
+    }
+
+    /// #1035: the loader writes a schema default into the component, so a
+    /// `tint_*` field with one would beat the preset (and since #1041 so
+    /// would a `tint_preset` default: an unwritten preset is none). Through the engine's
+    /// own schemas, a loaded `tint_preset = "underside"` is the underside,
+    /// and a script's one `set_field` of it switches a loaded sea over.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // reads the engine's schema files from the checkout
+    fn a_loaded_sea_takes_its_preset() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let registry = flint_schema::SchemaRegistry::load_from_directory(&dir).unwrap();
+        let scene = |ocean: &str| {
+            format!("[scene]\nname = \"t\"\n\n[entities.sea.ocean]\nseed = 7\n{ocean}\n")
+        };
+        let tint_of = |world: &flint_ecs::FlintWorld| {
+            let id = world.get_id("sea").unwrap();
+            OceanTint::from_component(&world.view(id, "ocean"))
+        };
+
+        let (world, _) = flint_scene::load_scene_string(
+            &scene("tint_preset = \"underside\"\ntint = 0.6"),
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(tint_of(&world), OceanTint::underside(0.6));
+
+        // #1041: no preset written is none, so `tint` alone is the sea's own
+        let (world, _) = flint_scene::load_scene_string(&scene("tint = 0.5"), &registry).unwrap();
+        let t = tint_of(&world);
+        assert_eq!(
+            t,
+            OceanTint {
+                amount: 0.5,
+                ..OceanTint::default()
+            },
+            "no red"
+        );
+
+        let (mut world, _) = flint_scene::load_scene_string(&scene(""), &registry).unwrap();
+        assert_eq!(tint_of(&world), OceanTint::default(), "off, the sea's own");
+        let id = world.get_id("sea").unwrap();
+        let mut components = world.get_components_mut(id).unwrap();
+        components.set_field("ocean", "tint_preset", toml::Value::from("underside"));
+        components.set_field("ocean", "tint", toml::Value::from(1.0));
+        drop(components);
+        assert_eq!(tint_of(&world), OceanTint::underside(1.0));
+        assert!(world.read_reports().is_empty());
     }
 
     #[test]

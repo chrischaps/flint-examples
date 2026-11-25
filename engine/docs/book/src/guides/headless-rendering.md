@@ -81,7 +81,7 @@ The binary lists the keys, so this page doesn't:
 | `flint render --style help` | Every style and its keys |
 | `flint render --help` | Every flag, grouped by heading |
 
-The per-effect flags these replaced (`--bloom-intensity`, `--fog-density`, `--kuwahara-radius`, `--ascii-ramp`...) still work for one release, and each prints its new spelling.
+The per-effect flags these replaced went in #1144: given one, `flint render` stops with an unknown-flag error naming its `--set` or `--style` spelling.
 
 The flags that are not `[post_process]` keys:
 
@@ -533,7 +533,7 @@ Headless rendering works on machines without a display. On one without a GPU, it
 
 ## Golden Suites
 
-`flint goldens` renders a `*.goldens.toml`, a list of cases, as `flint render` would and compares each with a golden PNG (#271). Before #327 this was `flint render-suite <x>.goldens.toml`, which still runs the same command for one release (#709 moved the music half of `render-suite` to `flint music render`). It exits non-zero when any case moves past its tolerance, so it works as a gate in a script or a test:
+`flint goldens` renders a `*.goldens.toml`, a list of cases, as `flint render` would and compares each with a golden PNG (#271). Before #327 this was `render-suite <x>.goldens.toml`; that spelling ran for a release more and is gone since #1141 (#709 moved the music half of `render-suite` to `flint music render`). It exits non-zero when any case moves past its tolerance, so it works as a gate in a script or a test:
 
 ```bash
 flint goldens crates/flint-cli/tests/golden/stylize.goldens.toml
@@ -603,15 +603,15 @@ A golden image pins a frame, and shimmer isn't in any one frame: it is a glyph t
 name = "ascii-motion-tone"
 scene = "tests/fixtures/scenes/ascii_motion.scene.toml"
 args = ["--no-grid", "--style", "ascii:edges=0"]   # any flint render flags but the sequence's own
-frames = 60
+frames = 30
 orbit = 6.8755                  # or camera_path = "path/to/cam.toml"
 max_reversals = 0.5             # A-B-A reversals a frame, the mean; required
 max_flips = 15.0                # glyph changes a frame, the mean; optional
 ```
 
 ```text
-  PASS  ascii-motion-tone   0.00 reversals/frame (limit 0.50), 9.4 flips/frame (limit 15.0), 60 frames, orbit 6.8755 deg/s, 3152 ms
-  PASS  ascii-motion-edges  0.16 reversals/frame (limit 1.00), 19.1 flips/frame (limit 30.0), 60 frames, orbit 6.8755 deg/s, 1153 ms
+  PASS  ascii-motion-tone   0.00 reversals/frame (limit 0.50), 7.9 flips/frame (limit 15.0), 30 frames, orbit 6.8755 deg/s, 998 ms
+  PASS  ascii-motion-edges  0.18 reversals/frame (limit 1.00), 15.3 flips/frame (limit 30.0), 30 frames, orbit 6.8755 deg/s, 985 ms
 ```
 
 The stylize suite has two, on a frozen copy of `flint-examples/ascii_motion.scene.toml` under the #277 bench's slow orbit: `ascii-motion-tone` (the tone glyphs alone, `edges=0`) and `ascii-motion-edges` (the default look, whose line glyphs keep a history of their own since #477). Each budget sits well under what a broken history measures. These are the numbers at 640 x 360 on an RTX 4070, with DX12 within 0.1:
@@ -623,7 +623,9 @@ The stylize suite has two, on a frozen copy of `flint-examples/ascii_motion.scen
 | `temporal = "off"` | 10.5 | 39.9 | 18.8 | 76.7 |
 | the budget | 0.5 | 15 | 1.0 | 30 |
 
-Each case catches its own regression. With the tone glyphs' hold taken out of `ascii_cells.wgsl`, both cases fail (2.21 and 1.84 reversals a frame). With the edge cells' history taken out of `ascii_edge_cells.wgsl`, `ascii-motion-tone` still passes at 0.00 and `ascii-motion-edges` fails at 10.0. `tests/render_goldens.rs` runs the tone case again with `hysteresis=0` and requires it to fail, so a budget loosened past that regression fails the test.
+The cases draw 30 frames since #961 (they were 60, about 160 s of CI's WARP job): the means a frame don't depend on the count. At 20, 30 and 60 frames the tone case reads 0.00 reversals each time and 2.39, 2.32 and 2.21 with `hysteresis = 0`; the edges case 0.17, 0.18 and 0.12, and 3.11, 3.46 and 3.50. Flips grow a little with the count (tone 6.1, 7.9, 9.4). WARP reads what the RTX reads (at 60 frames: 0.00 and 9.4, 0.09 and 17.5).
+
+Each case catches its own regression. With the tone glyphs' hold taken out of `ascii_cells.wgsl`, both cases fail (2.21 and 1.84 reversals a frame). With the edge cells' history taken out of `ascii_edge_cells.wgsl`, `ascii-motion-tone` still passes at 0.00 and `ascii-motion-edges` fails at 10.0. `tests/render_goldens.rs` runs the tone case again with `hysteresis=0`, at 20 frames, and requires it to fail, so a budget loosened past that regression fails the test.
 
 A sequence case takes no `golden`, `text`, `matches`, `error` or `tolerance`, and its `args` can't repeat what its keys say (`--frames`, `--orbit`, `--camera-path`, `--frame-dt`, `--flip-json`, `--output`...): the manifest is refused with the case's name. Its frames are drawn with `--flip-json <case>.flips.json --last-frame`, so the out dir has the per-frame counts and `<case>.png`, the last frame. Its `report.json` entry has a `sequence` object (`reversals_per_frame`, `flips_per_frame`, the budget, and the per-frame `flips` and `reversals`), and it never drifts or blesses: a budget changes only by editing the manifest, with the measurement that justifies it. Sequences are deterministic, so the counts are the same run to run on one adapter.
 
@@ -656,7 +658,7 @@ or `drift: none, every passing case is byte-identical with its golden`. The cont
 
 ### One process
 
-Cases run in the `flint goldens` process itself (#329). Each one's flags are parsed as `flint render` parses them and go to the same function, on one GPU device kept for the whole run. Every glTF is decoded once (`flint_import::memoize_imports`) and every texture's mip chain is built once (`flint_render::memoize_mip_chains`). Each case still builds its own renderer, so it shares only the device and those decoded bytes with the case before it. For the 41 stylize cases in a debug build, the run's CPU time went from about 120 s to 55 s. Summing each case's best time over several runs, the suite went from 115 s to 45 s, and a props-scene case from about 3.2 s to 1.1 s.
+Cases run in the `flint goldens` process itself (#329). Each one's flags are parsed as `flint render` parses them and go to the same function, on one GPU device kept for the whole run. Every glTF is decoded once (`flint_import::memoize_imports`) and every texture's mip chain is built once (`flint_render::memoize_mip_chains`). What a renderer builds that nothing writes is kept on the device for the next case too (`flint_render::pipeline_cache`): its pipelines (#911), and its models' and files' textures and its meshes' vertex and index buffers, keyed by their bytes (#961). Each case still builds its own renderer, so it shares only the device, those decoded bytes and those immutable GPU objects with the case before it; the run's last line counts the pipelines, textures and mesh buffers built and reused, and `--fresh-pipelines` builds every case's anew. On WARP the uploads mattered most: a case on a scene with the props' 2048-texel textures uploaded 130 to 180 MB, which took 3 to 13 s a case on most of CI's runners, and the skinned YBot's 3.5 MB of mesh about half a second more. For the 41 stylize cases in a debug build, the run's CPU time went from about 120 s to 55 s. Summing each case's best time over several runs, the suite went from 115 s to 45 s, and a props-scene case from about 3.2 s to 1.1 s.
 
 The cost is crash isolation. A case that panics is run again in its own `flint render` process (the device is dropped and made again for the next case), and its log is the case's message. `--isolate` spawns every case, as before #329.
 
@@ -680,7 +682,7 @@ On CI, the `GPU tests (WARP)` job (`.github/workflows/ci.yml`) runs the stylize 
 
 The engine's goldens run as `cargo test -p flint-cli --test render_goldens`. Each run writes to its own `target/tmp/stylize-goldens-<pid>`, so two runs in one target directory don't read each other's half-written output. The folder is removed when the run passes and kept when it fails, and the test prints its path. `FLINT_GOLDENS_OUT=<dir>` names a folder that is kept either way: CI sets it to `target/tmp/stylize-goldens`, the folder its summary and artifact read.
 
-flint-render's own GPU tests (`stylize`, `runtime_mesh`, `quality`, `shading_boil`, `panels`, `pipeline_cache`, `dev_shader`) share one device per test binary, made on first use by `tests/shared_gpu`. Each test made its own device until a run hung for hours: on Windows with an NVIDIA card, creating a Vulkan device while a finished test's thread exits can deadlock the driver against the Windows loader lock. A test borrows the shared device alongside the others. It takes it alone only when it counts objects across the whole device or switches something the whole process shares (the pipeline cache, the shader folder). Error scopes are no reason to: since wgpu 28 each thread has its own. `FLINT_GPU_TEST_PARALLEL=0` lends the device to one test at a time. That was the default while wgpu 23 stalled DX12 tests that waited side by side; on wgpu 30, sharing is faster on every backend (stylize: 8.8 s to 3.4 s on Vulkan, 13.1 s to 6.6 s on DX12, 18.9 s to 13.2 s on WARP, on an RTX 4070 machine). A watchdog aborts the binary and names the test once any test has held the device longer than `FLINT_GPU_TEST_TIMEOUT` seconds (300 by default), so a hang ends in minutes with a name, not in hours with none.
+flint-render's own GPU tests (`stylize`, `runtime_mesh`, `quality`, `shading_boil`, `panels`, `pipeline_cache`, `dev_shader`, and the crate's unit tests) share one device per test binary, made on first use by `tests/shared_gpu`. Each test made its own device until a run hung for hours: on Windows with an NVIDIA card, creating a Vulkan device while a finished test's thread exits can deadlock the driver against the Windows loader lock. A test borrows the shared device alongside the others. It takes it alone only when it counts objects across the whole device or switches something the whole process shares (the pipeline cache, the shader folder). Error scopes are no reason to: since wgpu 28 each thread has its own. `FLINT_GPU_TEST_PARALLEL=0` lends the device to one test at a time. That was the default while wgpu 23 stalled DX12 tests that waited side by side; on wgpu 30, sharing is faster on every backend (stylize: 8.8 s to 3.4 s on Vulkan, 13.1 s to 6.6 s on DX12, 18.9 s to 13.2 s on WARP, on an RTX 4070 machine). A watchdog aborts the binary and names the test once any test has held the device longer than `FLINT_GPU_TEST_TIMEOUT` seconds (300 by default), so a hang ends in minutes with a name, not in hours with none.
 
 A GPU wait outside the tests has no watchdog. wgpu 30 waits for as long as the GPU takes (wgpu 23 gave up after 60 s), so Flint's waits go through `flint_render::wait_for_gpu`, which stops at `FLINT_GPU_WAIT_TIMEOUT` seconds when that is set and panics with a message naming it. CI's GPU job sets 120, so a hung GPU in the goldens fails the step in two minutes instead of running to the job's 60-minute limit:
 

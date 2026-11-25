@@ -20,7 +20,11 @@
 //! Then each layer stack a manifest names loads whole, and every archetype
 //! names only components that stack declares (the registry skips an unknown
 //! one in silence, so an archetype with a misspelt component just has one
-//! component fewer).
+//! component fewer). A `required_component` constraint of the stack names an
+//! archetype the stack declares, which lists that component: when #681 made
+//! the examples' room "transform-only" while `rooms_have_bounds` still asked
+//! every room for `bounds`, the three showcase levels failed `flint check`
+//! and nothing in `cargo test` said why (#974).
 //!
 //! The repository's own tree must have no problem, and a tree with the #266
 //! mistake in it must have exactly that one, naming the file.
@@ -75,6 +79,23 @@ impl Layers {
         games.sort();
         assert!(!games.is_empty(), "no game kept in the checkout");
         stacks.extend(games.iter().filter_map(|g| manifest_stack(g)));
+        // An engine schema directory brings its packages' after it, as the
+        // resolver loads them (#1332)
+        for stack in &mut stacks {
+            *stack = stack
+                .iter()
+                .flat_map(|layer| {
+                    let engine = Path::new(layer).parent().unwrap_or(Path::new(""));
+                    let packages = flint_core::project::package_schema_dirs(&root.join(layer))
+                        .into_iter()
+                        .map(move |(name, _)| {
+                            let dir = engine.join("packages").join(name).join("schemas");
+                            normalize(&dir.to_string_lossy().replace('\\', "/"))
+                        });
+                    std::iter::once(layer.clone()).chain(packages)
+                })
+                .collect();
+        }
 
         let mut layers: Vec<String> = stacks.iter().flatten().cloned().collect();
         layers.sort();
@@ -305,6 +326,39 @@ fn problems(root: &Path, roots: &[&str], stacks: &[&[&str]]) -> Vec<String> {
                 }
             }
         }
+        // A constraint that asks an archetype for a component its schema
+        // doesn't list: the two say different things about what one is.
+        for layer in &dirs {
+            let Ok(constraints) = ConstraintRegistry::load_from_directory(layer) else {
+                continue; // said above, or by the file on its own
+            };
+            for constraint in constraints.all() {
+                let flint_constraint::ConstraintKind::RequiredComponent {
+                    archetype,
+                    component,
+                } = &constraint.kind
+                else {
+                    continue;
+                };
+                let lists = registry
+                    .get_archetype(archetype)
+                    .map(|a| a.has_component(component));
+                let problem = match lists {
+                    None => {
+                        format!("names archetype '{archetype}', which the stack doesn't declare")
+                    }
+                    Some(false) => format!(
+                        "asks every '{archetype}' for '{component}', which the archetype's \
+                         components don't list"
+                    ),
+                    Some(true) => continue,
+                };
+                found.push(format!(
+                    "{named}: constraint '{}' {problem}",
+                    constraint.name
+                ));
+            }
+        }
     }
     found.sort();
     found.dedup();
@@ -438,6 +492,37 @@ fn a_broken_file_of_each_kind_is_found_with_the_others() {
     );
     assert!(
         has("schemas: archetype 'character' names component 'transfrom'"),
+        "{found:#?}"
+    );
+}
+
+/// #974: the examples' room as #681 left it, "transform-only", while
+/// `rooms_have_bounds` asks every room for `bounds`. Found once in each
+/// stack that loads the examples' layer: the root's, and the showcase's.
+#[test]
+fn a_constraint_asking_an_archetype_for_a_component_it_lacks_is_found() {
+    let root = scratch_copy("room_without_bounds");
+    replace_in(
+        &root.join("schemas/examples/archetypes/room.toml"),
+        "components = [\"transform\", \"bounds\"]",
+        "components = [\"transform\"]",
+    );
+
+    let found = Layers::of_repo().problems(&root);
+    println!("{}", found.join("\n"));
+    let said = ": constraint 'rooms_have_bounds' asks every 'room' for 'bounds', which the \
+                archetype's components don't list";
+    assert_eq!(
+        found.len(),
+        2,
+        "one mistake, one problem a stack: {found:#?}"
+    );
+    assert!(found.iter().all(|l| l.ends_with(said)), "{found:#?}");
+    // The engine's set is `schemas` and the packages' it brings (#1332)
+    assert!(
+        found[0].starts_with(
+            "schemas + packages/living/schemas + packages/music/schemas + schemas/examples"
+        ),
         "{found:#?}"
     );
 }
