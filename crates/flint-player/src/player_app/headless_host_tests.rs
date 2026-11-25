@@ -93,6 +93,14 @@ fn one_of_each(entity: EntityId) -> Vec<ScriptCommand> {
             bus: s("voice"),
             volume: 0.5,
         },
+        C::SetUserBusVolume {
+            bus: s("music"),
+            volume: 0.4,
+        },
+        C::SetBusLowpass {
+            bus: s("sfx"),
+            hz: 800.0,
+        },
         C::FireEvent {
             name: s("bell"),
             data: toml::Value::Boolean(true),
@@ -175,6 +183,9 @@ fn one_of_each(entity: EntityId) -> Vec<ScriptCommand> {
         C::SetLook {
             name: Some(s("graphite")),
             seconds: 2.0,
+        },
+        C::PrepareLook {
+            name: s("ascii_noir"),
         },
         // The living subsystem's module commands (#698), one a function
         module(

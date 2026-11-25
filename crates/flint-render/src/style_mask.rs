@@ -117,9 +117,16 @@
 //! its id covers where it was drawn; at its rest pose it had holes where
 //! the mesh had moved off and spill where it had moved from.
 //!
+//! The veil does the same for a drifting translucent in front (#1241): it
+//! pairs `wooze_vertex.wgsl`'s stages, the main pass's own, with `fs_veil`,
+//! built the first frame one is veiled
+//! ([`ensure_veil_wooze`](StyleMaskPass::ensure_veil_wooze)), so a woozy
+//! pane hands back the glyphs behind where it is drawn, not where it was.
+//!
 //! [`StyleDescriptor::uses_mask`]: crate::stylize::StyleDescriptor::uses_mask
 //! [`StyleDescriptor::component`]: crate::stylize::StyleDescriptor::component
 
+use crate::gpu_counts::{CountedDevice, CountedQueue};
 use crate::postprocess::PostProcessConfig;
 use crate::stylize::{StyleDescriptor, StyleParam, StyleRegistry};
 use crate::TrustedShader;
@@ -194,9 +201,17 @@ pub fn encode_blend(blend: f32) -> u32 {
     (blend.clamp(0.0, 1.0) * BLEND_ONE as f32).round() as u32
 }
 
-/// The mask's shader: the tear's mask (#397), then `style_mask.wgsl`.
+/// The mask's shader: the tear's mask (#397), a mesh's vertex side in a mesh
+/// block (`wgsl_sources::MASK_VERTEX`'s two files, #1244: the transform at
+/// group 0, `world_of` / `clip_of`, `skin_transform`), then
+/// `style_mask.wgsl`.
 pub(crate) const STYLE_MASK_WGSL: &str = concat!(
     include_str!("tear_mask.wgsl"),
+    "\n//FLINT_MESH {\n",
+    include_str!("mesh_vertex.wgsl"),
+    "\n",
+    include_str!("skinning.wgsl"),
+    "\n//FLINT_MESH }\n",
     include_str!("style_mask.wgsl")
 );
 
@@ -208,9 +223,33 @@ pub(crate) fn woozy_mask_source() -> String {
     format!(
         "{}\n{}\n{}",
         include_str!("wooze_noise.wgsl"),
-        STYLE_MASK_WGSL.replace("//FLINT_WOOZE ", ""),
+        crate::wgsl_sources::woozy(STYLE_MASK_WGSL),
         include_str!("style_mask_wooze.wgsl")
     )
+}
+
+/// The mask's shader for billboards (#1011): the mask shader without its
+/// mesh blocks (the lines between `//FLINT_MESH {` and `//FLINT_MESH }`:
+/// the transform, the bones and the mesh vertex stages, whose groups the
+/// sprite's bind groups take), then the billboard's vertex stage and
+/// fragments. The plain module stays [`STYLE_MASK_WGSL`], so a frame with
+/// no styled billboard compiles and runs exactly what it did.
+pub(crate) fn billboard_mask_source() -> String {
+    let mut out = String::new();
+    let mut mesh = false;
+    for line in STYLE_MASK_WGSL.lines() {
+        match line.trim() {
+            "//FLINT_MESH {" => mesh = true,
+            "//FLINT_MESH }" => mesh = false,
+            _ if !mesh => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    out.push_str(include_str!("style_mask_billboard.wgsl"));
+    out
 }
 
 /// The id of a pixel no style drew.
@@ -1186,14 +1225,29 @@ impl FieldUniform {
     }
 }
 
-/// One masked static (or procedural box) draw.
+/// What a masked draw draws: a mesh with its cached transform (static, a
+/// procedural box, a terrain chunk, or skinned with its bones), or a
+/// billboard's quad with the sprite's own bind groups (#1011).
+pub(crate) enum MaskShape<'a> {
+    Mesh {
+        vertex_buffer: &'a wgpu::Buffer,
+        index_buffer: &'a wgpu::Buffer,
+        index_count: u32,
+        transform_bind_group: &'a wgpu::BindGroup,
+        /// The bone matrices, for a skinned draw.
+        bones: Option<&'a wgpu::BindGroup>,
+    },
+    /// The sprite's uniforms (group 0 of the billboard pipeline) and its
+    /// texture (group 1 there, group 2 in the mask's).
+    Billboard {
+        billboard_bind_group: &'a wgpu::BindGroup,
+        texture_bind_group: &'a wgpu::BindGroup,
+    },
+}
+
+/// One masked draw.
 pub(crate) struct MaskDraw<'a> {
-    pub vertex_buffer: &'a wgpu::Buffer,
-    pub index_buffer: &'a wgpu::Buffer,
-    pub index_count: u32,
-    pub transform_bind_group: &'a wgpu::BindGroup,
-    /// The bone matrices, for a skinned draw.
-    pub bones: Option<&'a wgpu::BindGroup>,
+    pub shape: MaskShape<'a>,
     pub id: u16,
     /// How much of the style the entity is drawn with, 0..1 (#278).
     pub blend: f32,
@@ -1203,6 +1257,20 @@ pub(crate) struct MaskDraw<'a> {
     /// Whether its vertices drift on the wooze field (#215), as the main
     /// pass drew them: it is masked through the woozy vertex stages (#737).
     pub woozy: bool,
+}
+
+impl MaskDraw<'_> {
+    /// The bone matrices of a skinned mesh draw.
+    pub fn bones(&self) -> Option<&wgpu::BindGroup> {
+        match &self.shape {
+            MaskShape::Mesh { bones, .. } => *bones,
+            MaskShape::Billboard { .. } => None,
+        }
+    }
+
+    pub fn is_billboard(&self) -> bool {
+        matches!(self.shape, MaskShape::Billboard { .. })
+    }
 }
 
 /// One transparent mesh in front of whatever it covers, for the veil
@@ -1218,6 +1286,10 @@ pub(crate) struct VeilMesh<'a> {
     /// A living prop's echo (#737): skinned, front faces only, as the main
     /// pass draws it, so a two-sided leaf card covers once.
     pub echo: bool,
+    /// Drawn through shallow wooze's vertex stage (#1241), as the main
+    /// pass drew it, so it covers where it drifted to and not its rest
+    /// pose. An echo is never woozy.
+    pub woozy: bool,
 }
 
 /// The frame's particles, for the veil: the particle pipeline's shared
@@ -1243,6 +1315,13 @@ impl Veil<'_> {
     }
 }
 
+/// The veil's woozy pipelines (#1241): `wooze_vertex.wgsl`'s stages, the
+/// ones the main pass drifts a mesh with, over the same `fs_veil`s.
+struct WoozyVeil {
+    static_pipeline: wgpu::RenderPipeline,
+    skinned_pipeline: wgpu::RenderPipeline,
+}
+
 /// The veil's particle pipelines: alpha-like modes and additive.
 struct ParticleVeil {
     alpha: wgpu::RenderPipeline,
@@ -1261,22 +1340,44 @@ fn veil_pipeline(
     buffers: &[wgpu::VertexBufferLayout<'static>],
     cull_mode: Option<wgpu::Face>,
 ) -> wgpu::RenderPipeline {
+    veil_pipeline_split(
+        device,
+        label,
+        (module, vs),
+        (module, fs),
+        layouts,
+        buffers,
+        cull_mode,
+    )
+}
+
+/// [`veil_pipeline`] with its vertex stage from another module: shallow
+/// wooze's (#1241), whose stages hand over what the plain ones do.
+fn veil_pipeline_split(
+    device: &wgpu::Device,
+    label: &str,
+    (vertex, vs): (&wgpu::ShaderModule, &str),
+    (fragment, fs): (&wgpu::ShaderModule, &str),
+    layouts: &[&wgpu::BindGroupLayout],
+    buffers: &[wgpu::VertexBufferLayout<'static>],
+    cull_mode: Option<wgpu::Face>,
+) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: &layouts.iter().copied().map(Some).collect::<Vec<_>>(),
         immediate_size: 0,
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
-            module,
+            module: vertex,
             entry_point: Some(vs),
             buffers: &buffers.iter().cloned().map(Some).collect::<Vec<_>>(),
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
-            module,
+            module: fragment,
             entry_point: Some(fs),
             targets: &[Some(wgpu::ColorTargetState {
                 format: VEIL_FORMAT,
@@ -1321,10 +1422,15 @@ pub struct StyleMaskPass {
     /// drifts, and the module they come from (the 4x path's are made from
     /// it too).
     woozy: Option<(wgpu::ShaderModule, MaskStages)>,
+    /// The billboard pipeline (#1011), made the first frame a styled
+    /// billboard is masked.
+    billboard: Option<BillboardMask>,
     veil_static: wgpu::RenderPipeline,
     veil_skinned: wgpu::RenderPipeline,
     /// `veil_skinned` on front faces only, for echoes (#737).
     veil_echo: wgpu::RenderPipeline,
+    /// Made the first frame a blended draw in front drifts (#1241).
+    veil_woozy: Option<WoozyVeil>,
     /// Made the first frame with particles (the particle pipeline is too).
     veil_particles: Option<ParticleVeil>,
     draw_bgl: wgpu::BindGroupLayout,
@@ -1380,7 +1486,7 @@ impl MaskStages {
                 fragment,
                 samples,
                 &[transform_bgl, draw_bgl],
-                crate::primitives::Vertex::desc(),
+                Some(crate::primitives::Vertex::desc()),
             ),
             skinned_pipeline: mask_pipeline(
                 device,
@@ -1390,14 +1496,52 @@ impl MaskStages {
                 fragment,
                 samples,
                 &[transform_bgl, draw_bgl, bone_bgl],
-                crate::primitives::SkinnedVertex::desc(),
+                Some(crate::primitives::SkinnedVertex::desc()),
             ),
         }
     }
 }
 
+/// The mask's billboard pipeline (#1011) and what the 4x one is made from:
+/// the billboard module, the sprite's two layouts, and the billboard
+/// pipeline's quad index buffer the draws are indexed by.
+struct BillboardMask {
+    shader: wgpu::ShaderModule,
+    uniforms_bgl: wgpu::BindGroupLayout,
+    texture_bgl: wgpu::BindGroupLayout,
+    quad: wgpu::Buffer,
+    pipeline: wgpu::RenderPipeline,
+}
+
+/// The billboard mask pipeline (#1011) from `shader` at `samples` over
+/// `draw_bgl`: the sprite's uniforms in group 0, the mask's draw group in 1
+/// (the meshes' slot), the sprite's texture in 2.
+fn billboard_mask_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    (uniforms, texture): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
+    draw_bgl: &wgpu::BindGroupLayout,
+    samples: u32,
+) -> wgpu::RenderPipeline {
+    let (label, fragment) = if samples > 1 {
+        ("Style Mask MSAA Billboard Pipeline", "fs_billboard_msaa")
+    } else {
+        ("Style Mask Billboard Pipeline", "fs_billboard")
+    };
+    mask_pipeline(
+        device,
+        shader,
+        label,
+        "vs_billboard",
+        fragment,
+        samples,
+        &[uniforms, draw_bgl, texture],
+        None,
+    )
+}
+
 fn mask_draw_buffer(device: &wgpu::Device, slots: usize) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
+    device.create_buffer_counted(&wgpu::BufferDescriptor {
         label: Some("Style Mask Draws"),
         size: DRAW_STRIDE * slots as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -1413,6 +1557,8 @@ struct MsaaMask {
     skinned_pipeline: wgpu::RenderPipeline,
     /// The woozy vertex stages at 4x (#737), made with the single-sample ones.
     woozy: Option<MaskStages>,
+    /// The billboard pipeline at 4x (#1011), made with the single-sample one.
+    billboard: Option<wgpu::RenderPipeline>,
     draw_bgl: wgpu::BindGroupLayout,
     resolve_pipeline: wgpu::RenderPipeline,
     resolve_bgl: wgpu::BindGroupLayout,
@@ -1438,20 +1584,21 @@ fn mask_pipeline(
     fragment: &str,
     samples: u32,
     layouts: &[&wgpu::BindGroupLayout],
-    buffer: wgpu::VertexBufferLayout<'static>,
+    buffer: Option<wgpu::VertexBufferLayout<'static>>,
 ) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: &layouts.iter().copied().map(Some).collect::<Vec<_>>(),
         immediate_size: 0,
     });
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some(label),
         layout: Some(&layout),
         vertex: wgpu::VertexState {
             module: shader,
             entry_point: Some(entry),
-            buffers: &[Some(buffer)],
+            // A billboard's quad has none: its corners come from the index
+            buffers: &buffer.into_iter().map(Some).collect::<Vec<_>>(),
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -1560,7 +1707,7 @@ impl MsaaMask {
             "fs_msaa",
             MSAA_SAMPLES,
             &[transform_bgl, &draw_bgl],
-            crate::primitives::Vertex::desc(),
+            Some(crate::primitives::Vertex::desc()),
         );
         let skinned_pipeline = mask_pipeline(
             device,
@@ -1570,7 +1717,7 @@ impl MsaaMask {
             "fs_msaa",
             MSAA_SAMPLES,
             &[transform_bgl, &draw_bgl, bone_bgl],
-            crate::primitives::SkinnedVertex::desc(),
+            Some(crate::primitives::SkinnedVertex::desc()),
         );
         let resolve_shader = device.create_trusted_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Style Mask Resolve Shader"),
@@ -1594,35 +1741,37 @@ impl MsaaMask {
             bind_group_layouts: &[Some(&resolve_bgl)],
             immediate_size: 0,
         });
-        let resolve_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Style Mask Resolve Pipeline"),
-            layout: Some(&resolve_layout),
-            vertex: wgpu::VertexState {
-                module: &resolve_shader,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &resolve_shader,
-                entry_point: Some("fs_resolve"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: STYLE_MASK_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let resolve_pipeline =
+            device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
+                label: Some("Style Mask Resolve Pipeline"),
+                layout: Some(&resolve_layout),
+                vertex: wgpu::VertexState {
+                    module: &resolve_shader,
+                    entry_point: Some("vs_fullscreen"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &resolve_shader,
+                    entry_point: Some("fs_resolve"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: STYLE_MASK_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         Self {
             static_pipeline,
             skinned_pipeline,
             woozy: None,
+            billboard: None,
             draw_bgl,
             resolve_pipeline,
             resolve_bgl,
@@ -1635,7 +1784,7 @@ impl MsaaMask {
         if matches!(&self.target, Some((_, w, h, _)) if (*w, *h) == (width, height)) {
             return;
         }
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some("Style Mask MSAA"),
             size: wgpu::Extent3d {
                 width,
@@ -1650,7 +1799,7 @@ impl MsaaMask {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let bind = device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
             label: Some("Style Mask Resolve BG"),
             layout: &self.resolve_bgl,
             entries: &[wgpu::BindGroupEntry {
@@ -1686,7 +1835,7 @@ impl StyleMaskPass {
             "fs_main",
             1,
             &[transform_bgl, &draw_bgl],
-            crate::primitives::Vertex::desc(),
+            Some(crate::primitives::Vertex::desc()),
         );
         let skinned_pipeline = mask_pipeline(
             device,
@@ -1696,7 +1845,7 @@ impl StyleMaskPass {
             "fs_main",
             1,
             &[transform_bgl, &draw_bgl, bone_bgl],
-            crate::primitives::SkinnedVertex::desc(),
+            Some(crate::primitives::SkinnedVertex::desc()),
         );
         let pbr = device.create_trusted_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Style Veil PBR Shader"),
@@ -1735,7 +1884,7 @@ impl StyleMaskPass {
         );
         let draw_buffer = mask_draw_buffer(device, INITIAL_MASK_SLOTS);
         // Zeroed at creation: no shapes
-        let field_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let field_buffer = device.create_buffer_counted(&wgpu::BufferDescriptor {
             label: Some("Style Mask Field"),
             size: std::mem::size_of::<FieldUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -1745,9 +1894,11 @@ impl StyleMaskPass {
             static_pipeline,
             skinned_pipeline,
             woozy: None,
+            billboard: None,
             veil_static,
             veil_skinned,
             veil_echo,
+            veil_woozy: None,
             veil_particles: None,
             draw_bgl,
             msaa: None,
@@ -1822,6 +1973,103 @@ impl StyleMaskPass {
         }
     }
 
+    /// Build the veil's woozy pipelines (#1241) if they aren't yet: the
+    /// first frame a blended draw in front of a styled one drifts on the
+    /// wooze field. A scene without one never makes them, so its frames
+    /// are what they were.
+    pub(crate) fn ensure_veil_wooze(&mut self, device: &wgpu::Device, layouts: &MaskLayouts<'_>) {
+        if self.veil_woozy.is_some() {
+            return;
+        }
+        let vertex = crate::wooze_pipeline::vertex_module(device);
+        let pbr = device.create_trusted_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Style Veil Woozy PBR Shader"),
+            source: wgpu::ShaderSource::Wgsl(crate::wgsl_sources::SCENE.into()),
+        });
+        let skinned = device.create_trusted_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Style Veil Woozy Skinned Shader"),
+            source: wgpu::ShaderSource::Wgsl(crate::wgsl_sources::SKINNED.into()),
+        });
+        let (transform, material, light) = (layouts.transform, layouts.material, layouts.light);
+        self.veil_woozy = Some(WoozyVeil {
+            static_pipeline: veil_pipeline_split(
+                device,
+                "Style Veil Woozy Pipeline",
+                (&vertex, "vs_wooze"),
+                (&pbr, "fs_veil"),
+                &[transform, material, light],
+                &[crate::primitives::Vertex::desc()],
+                None,
+            ),
+            skinned_pipeline: veil_pipeline_split(
+                device,
+                "Style Veil Woozy Skinned Pipeline",
+                (&vertex, "vs_skinned_wooze"),
+                (&skinned, "fs_veil"),
+                &[transform, material, light, layouts.bones],
+                &[crate::primitives::SkinnedVertex::desc()],
+                None,
+            ),
+        });
+    }
+
+    /// The veil pipeline a mesh draws through: the main pass's vertex
+    /// stage (#1241), and front faces only for an echo (#737).
+    fn veil_mesh_pipeline(&self, skinned: bool, echo: bool, woozy: bool) -> &wgpu::RenderPipeline {
+        let woozy = if woozy {
+            self.veil_woozy.as_ref()
+        } else {
+            None
+        };
+        match (echo, skinned, woozy) {
+            (true, _, _) => &self.veil_echo,
+            (false, true, Some(w)) => &w.skinned_pipeline,
+            (false, false, Some(w)) => &w.static_pipeline,
+            (false, true, None) => &self.veil_skinned,
+            (false, false, None) => &self.veil_static,
+        }
+    }
+
+    /// Build the billboard pipeline (#1011) if it isn't yet, at 1x and,
+    /// once the 4x path exists, at 4x: the first frame a styled billboard
+    /// is masked. `uniforms` and `texture` are the billboard pipeline's
+    /// layouts, `quad` its index buffer. Call it after
+    /// [`ensure_msaa`](Self::ensure_msaa).
+    pub(crate) fn ensure_billboard(
+        &mut self,
+        device: &wgpu::Device,
+        uniforms: &wgpu::BindGroupLayout,
+        texture: &wgpu::BindGroupLayout,
+        quad: &wgpu::Buffer,
+    ) {
+        if self.billboard.is_none() {
+            let shader = device.create_trusted_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Style Mask Billboard Shader"),
+                source: wgpu::ShaderSource::Wgsl(billboard_mask_source().into()),
+            });
+            let pipeline =
+                billboard_mask_pipeline(device, &shader, (uniforms, texture), &self.draw_bgl, 1);
+            self.billboard = Some(BillboardMask {
+                shader,
+                uniforms_bgl: uniforms.clone(),
+                texture_bgl: texture.clone(),
+                quad: quad.clone(),
+                pipeline,
+            });
+        }
+        if let (Some(msaa), Some(mask)) = (&mut self.msaa, &self.billboard) {
+            if msaa.billboard.is_none() {
+                msaa.billboard = Some(billboard_mask_pipeline(
+                    device,
+                    &mask.shader,
+                    (&mask.uniforms_bgl, &mask.texture_bgl),
+                    &msaa.draw_bgl,
+                    MSAA_SAMPLES,
+                ));
+            }
+        }
+    }
+
     /// The per-draw uniforms' binding, the same in both draw layouts.
     fn uniform_entry(&self) -> wgpu::BindGroupEntry<'_> {
         wgpu::BindGroupEntry {
@@ -1858,7 +2106,7 @@ impl StyleMaskPass {
             crate::bind_cache::Bound::View(veil),
         ];
         binds.get_over(depth_key, "Style Mask Draw BG", 0, &over, || {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
+            device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("Style Mask Draw BG"),
                 layout: &self.draw_bgl,
                 entries: &[
@@ -1895,7 +2143,7 @@ impl StyleMaskPass {
         {
             let shader = device.create_trusted_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("Style Veil Particle Shader"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("particle_shader.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(crate::wgsl_sources::PARTICLE.into()),
             });
             let layouts = [
                 &pp.uniform_bind_group_layout,
@@ -1946,13 +2194,9 @@ impl StyleMaskPass {
         }
         let mut bound = None;
         for m in &veil.meshes {
-            let key = (m.bones.is_some(), m.echo);
+            let key = (m.bones.is_some(), m.echo, m.woozy);
             if bound != Some(key) {
-                pass.set_pipeline(match key {
-                    (_, true) => &self.veil_echo,
-                    (true, false) => &self.veil_skinned,
-                    (false, false) => &self.veil_static,
-                });
+                pass.set_pipeline(self.veil_mesh_pipeline(key.0, key.1, key.2));
                 pass.set_bind_group(2, veil.light_bind_group, &[]);
                 bound = Some(key);
             }
@@ -2006,7 +2250,7 @@ impl StyleMaskPass {
             crate::bind_cache::Bound::View(depth.view),
         ];
         binds.get_bound("Style Mask MSAA Draw BG", 0, &over, || {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
+            device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("Style Mask MSAA Draw BG"),
                 layout: &msaa.draw_bgl,
                 entries: &[
@@ -2084,12 +2328,12 @@ impl StyleMaskPass {
                 .copy_from_slice(bytemuck::bytes_of(&uniform));
         }
         if !self.scratch.is_empty() {
-            queue.write_buffer(&self.draw_buffer, 0, &self.scratch);
+            queue.write_buffer_counted(&self.draw_buffer, 0, &self.scratch);
         }
         // The field (#859): written only when a draw reads it and it moved
         if follows_field && *field != self.field_written {
             let uniform = FieldUniform::of(field);
-            queue.write_buffer(&self.field_buffer, 0, bytemuck::bytes_of(&uniform));
+            queue.write_buffer_counted(&self.field_buffer, 0, bytemuck::bytes_of(&uniform));
             self.field_written.clone_from(field);
         }
 
@@ -2105,7 +2349,16 @@ impl StyleMaskPass {
                 let mut pass = clear_pass(encoder, "Style Mask MSAA Pass", ms_view);
                 if let Some(draw_bg) = &draw_bg {
                     let plain = (&msaa.static_pipeline, &msaa.skinned_pipeline);
-                    record_draws(&mut pass, draws, draw_bg, plain, msaa.woozy.as_ref());
+                    let billboard = msaa
+                        .billboard
+                        .as_ref()
+                        .zip(self.billboard.as_ref().map(|b| &b.quad));
+                    let kinds = DrawKinds {
+                        plain,
+                        woozy: msaa.woozy.as_ref(),
+                        billboard,
+                    };
+                    record_draws(&mut pass, draws, draw_bg, kinds);
                 }
             }
             let mut pass = clear_pass(encoder, "Style Mask Resolve Pass", &mask.view);
@@ -2121,9 +2374,12 @@ impl StyleMaskPass {
             .then(|| self.draw_bind(device, binds, scene_depth, veil_view, depth_key));
         let mut pass = clear_pass(encoder, "Style Mask Pass", &mask.view);
         if let Some(draw_bg) = &draw_bg {
-            let plain = (&self.static_pipeline, &self.skinned_pipeline);
-            let woozy = self.woozy.as_ref().map(|(_, stages)| stages);
-            record_draws(&mut pass, draws, draw_bg, plain, woozy);
+            let kinds = DrawKinds {
+                plain: (&self.static_pipeline, &self.skinned_pipeline),
+                woozy: self.woozy.as_ref().map(|(_, stages)| stages),
+                billboard: self.billboard.as_ref().map(|b| (&b.pipeline, &b.quad)),
+            };
+            record_draws(&mut pass, draws, draw_bg, kinds);
         }
     }
 }
@@ -2152,37 +2408,98 @@ fn clear_pass<'e>(
     })
 }
 
+/// The pipelines one sample count draws the mask with: static and skinned,
+/// the woozy pair once made (#737), and the billboard's with its quad's
+/// index buffer once made (#1011).
+struct DrawKinds<'p> {
+    plain: (&'p wgpu::RenderPipeline, &'p wgpu::RenderPipeline),
+    woozy: Option<&'p MaskStages>,
+    billboard: Option<(&'p wgpu::RenderPipeline, &'p wgpu::Buffer)>,
+}
+
+/// Which of [`DrawKinds`]' pipelines is bound.
+#[derive(Clone, Copy, PartialEq)]
+enum BoundKind {
+    Mesh { skinned: bool, woozy: bool },
+    Billboard,
+}
+
 /// Record every masked draw, switching between the static and skinned
-/// pipelines, plain or woozy (#737), as the list does. A woozy draw with
-/// no woozy stages yet (the caller didn't
-/// [`ensure_wooze`](StyleMaskPass::ensure_wooze)) is drawn plain.
+/// pipelines, plain or woozy (#737), and the billboard's (#1011), as the
+/// list does. A woozy draw with no woozy stages yet (the caller didn't
+/// [`ensure_wooze`](StyleMaskPass::ensure_wooze)) is drawn plain; a
+/// billboard with no billboard pipeline (no
+/// [`ensure_billboard`](StyleMaskPass::ensure_billboard)) isn't drawn.
 fn record_draws(
     pass: &mut wgpu::RenderPass<'_>,
     draws: &[MaskDraw<'_>],
     draw_bg: &wgpu::BindGroup,
-    (static_pipeline, skinned_pipeline): (&wgpu::RenderPipeline, &wgpu::RenderPipeline),
-    woozy: Option<&MaskStages>,
+    kinds: DrawKinds<'_>,
 ) {
+    let (static_pipeline, skinned_pipeline) = kinds.plain;
     let mut bound = None;
     for (i, d) in draws.iter().enumerate() {
-        let key = (d.bones.is_some(), d.woozy && woozy.is_some());
-        if bound != Some(key) {
-            pass.set_pipeline(match (key, woozy) {
-                ((true, true), Some(w)) => &w.skinned_pipeline,
-                ((false, true), Some(w)) => &w.static_pipeline,
-                ((true, _), _) => skinned_pipeline,
-                ((false, _), _) => static_pipeline,
-            });
-            bound = Some(key);
+        let offset = [(i as u64 * DRAW_STRIDE) as u32];
+        match &d.shape {
+            MaskShape::Mesh {
+                vertex_buffer,
+                index_buffer,
+                index_count,
+                transform_bind_group,
+                bones,
+            } => {
+                let key = BoundKind::Mesh {
+                    skinned: bones.is_some(),
+                    woozy: d.woozy && kinds.woozy.is_some(),
+                };
+                if bound != Some(key) {
+                    pass.set_pipeline(match (key, kinds.woozy) {
+                        (
+                            BoundKind::Mesh {
+                                skinned: true,
+                                woozy: true,
+                            },
+                            Some(w),
+                        ) => &w.skinned_pipeline,
+                        (
+                            BoundKind::Mesh {
+                                skinned: false,
+                                woozy: true,
+                            },
+                            Some(w),
+                        ) => &w.static_pipeline,
+                        (BoundKind::Mesh { skinned: true, .. }, _) => skinned_pipeline,
+                        _ => static_pipeline,
+                    });
+                    bound = Some(key);
+                }
+                pass.set_bind_group(0, *transform_bind_group, &[]);
+                pass.set_bind_group(1, draw_bg, &offset);
+                if let Some(bones) = bones {
+                    pass.set_bind_group(2, *bones, &[]);
+                }
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..*index_count, 0, 0..1);
+            }
+            MaskShape::Billboard {
+                billboard_bind_group,
+                texture_bind_group,
+            } => {
+                let Some((pipeline, quad)) = kinds.billboard else {
+                    continue;
+                };
+                if bound != Some(BoundKind::Billboard) {
+                    pass.set_pipeline(pipeline);
+                    pass.set_index_buffer(quad.slice(..), wgpu::IndexFormat::Uint32);
+                    bound = Some(BoundKind::Billboard);
+                }
+                pass.set_bind_group(0, *billboard_bind_group, &[]);
+                pass.set_bind_group(1, draw_bg, &offset);
+                pass.set_bind_group(2, *texture_bind_group, &[]);
+                pass.draw_indexed(0..6, 0, 0..1);
+            }
         }
-        pass.set_bind_group(0, d.transform_bind_group, &[]);
-        pass.set_bind_group(1, draw_bg, &[(i as u64 * DRAW_STRIDE) as u32]);
-        if let Some(bones) = d.bones {
-            pass.set_bind_group(2, bones, &[]);
-        }
-        pass.set_vertex_buffer(0, d.vertex_buffer.slice(..));
-        pass.set_index_buffer(d.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..d.index_count, 0, 0..1);
     }
 }
 
@@ -2247,6 +2564,68 @@ mod tests {
         for c in ["ascii_style", "pencil_style", "watercolor_style"] {
             assert!(checked.contains(&c), "{c} checked: {checked:?}");
         }
+    }
+
+    /// #1063: each style's (and `ui_text`'s) asset field lists, as its
+    /// `builtins`, exactly the names its loader takes with no file, so
+    /// `flint validate` passes `amber` and `none` and calls `ambr` missing.
+    /// The schema can't ask this crate, so this holds the two lists equal.
+    #[test]
+    #[allow(clippy::disallowed_methods)] // reads the engine's schema files from the checkout
+    fn the_asset_fields_name_the_built_ins_their_loaders_take() {
+        use flint_core::project::AssetKind;
+        use flint_schema::FieldType;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas");
+        let registry = flint_schema::SchemaRegistry::load_from_directory(&dir).unwrap();
+        let none = [crate::stylize::images::NO_IMAGE];
+        let glyphs = [crate::glyph_atlas::BUILTIN_SET];
+        let fields: [(&str, &str, &[AssetKind], &[&str]); 6] = [
+            (
+                "ascii_style",
+                "palette",
+                &[AssetKind::Palettes],
+                crate::palette::BUILTIN_PALETTES,
+            ),
+            ("ascii_style", "font", &[AssetKind::GlyphSets], &glyphs),
+            ("pencil_style", "paper_image", &[AssetKind::Papers], &none),
+            ("pencil_style", "stroke_image", &[AssetKind::Strokes], &none),
+            (
+                "watercolor_style",
+                "paper_image",
+                &[AssetKind::Papers],
+                &none,
+            ),
+            (
+                "ui_text",
+                "font",
+                &[AssetKind::GlyphSets, AssetKind::Fonts],
+                &glyphs,
+            ),
+        ];
+        for (component, field, want_kinds, want_builtins) in fields {
+            let schema = registry
+                .get_component(component)
+                .and_then(|c| c.get_field(field))
+                .unwrap_or_else(|| panic!("no field {component}.{field}"));
+            let FieldType::Asset {
+                kinds, builtins, ..
+            } = &schema.field_type
+            else {
+                panic!("{component}.{field} is no asset field");
+            };
+            assert_eq!(kinds.as_slice(), want_kinds, "{component}.{field}'s kinds");
+            assert_eq!(builtins, want_builtins, "{component}.{field}'s builtins");
+        }
+        // Each image option's no-file name is the one the schema lists
+        let mut images = 0;
+        for style in ["pencil", "watercolor"] {
+            let d = crate::stylize::builtin(style).unwrap();
+            for option in d.options.iter().filter(|o| o.name.ends_with("_image")) {
+                assert_eq!(option.default, crate::stylize::images::NO_IMAGE);
+                images += 1;
+            }
+        }
+        assert_eq!(images, 3, "pencil's paper and strokes, watercolor's paper");
     }
 
     #[test]
@@ -2832,7 +3211,7 @@ mod tests {
             "per-entity rows are found by mask id"
         );
 
-        // --ascii-no-edges in a scene with no style_mask: no mask
+        // ASCII's edges off in a scene with no style_mask: no mask
         let (none, _) = resolved(&empty, &config);
         assert!(!crate::stylize::StyleRegistry::new().any_uses_mask(&config, &none));
     }
@@ -3177,6 +3556,91 @@ mod tests {
             assert!(entries.iter().any(|n| n == e), "{e} in {entries:?}");
         }
         assert!(!plain_entries.iter().any(|n| n.ends_with("_wooze")));
+    }
+
+    /// The billboard module (#1011) validates with the billboard's own
+    /// stages and none of a mesh's, and nothing in it is bound twice: the
+    /// sprite's groups 0 and 2 take the slots the mesh blocks left. The
+    /// plain module keeps its mesh stages.
+    #[test]
+    fn the_billboard_mask_module_validates_without_the_mesh_blocks() {
+        let src = billboard_mask_source();
+        let module = naga::front::wgsl::parse_str(&src).expect("parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::default(),
+        )
+        .validate(&module)
+        .expect("validates");
+        let entries: Vec<_> = module.entry_points.iter().map(|e| e.name.clone()).collect();
+        for e in ["vs_billboard", "fs_billboard", "fs_billboard_msaa"] {
+            assert!(entries.iter().any(|n| n == e), "{e} in {entries:?}");
+        }
+        for e in ["vs_static", "vs_skinned"] {
+            assert!(!entries.iter().any(|n| n == e), "{e} left in {entries:?}");
+        }
+        assert!(
+            !src.contains("//FLINT_MESH {") && !src.contains("//FLINT_MESH }"),
+            "every block is cut"
+        );
+        assert!(STYLE_MASK_WGSL.matches("//FLINT_MESH {").count() == 3);
+        let mut bindings: Vec<_> = module
+            .global_variables
+            .iter()
+            .filter_map(|(_, g)| g.binding.as_ref().map(|b| (b.group, b.binding)))
+            .collect();
+        let n = bindings.len();
+        bindings.sort_unstable();
+        bindings.dedup();
+        assert_eq!(bindings.len(), n, "a binding declared twice: {bindings:?}");
+        for b in [(0, 0), (0, 1), (1, 0), (2, 0), (2, 1)] {
+            assert!(bindings.contains(&b), "{b:?} in {bindings:?}");
+        }
+        let plain = naga::front::wgsl::parse_str(STYLE_MASK_WGSL).expect("parses");
+        assert!(plain.entry_points.iter().any(|e| e.name == "vs_static"));
+        assert!(!plain
+            .entry_points
+            .iter()
+            .any(|e| e.name.contains("billboard")));
+    }
+
+    /// A billboard's box holds its quad's corners under any camera basis
+    /// (#1011), at the anchors a sprite takes.
+    #[test]
+    fn a_sprites_bounds_hold_its_quad_however_the_camera_turns() {
+        use crate::billboard_pipeline::{sprite_bounds, SpriteInstance};
+        for anchor_y in [0.0, 0.5, 1.0, -0.25] {
+            let sprite = SpriteInstance {
+                world_pos: [1.0, 2.0, -3.0],
+                width: 0.8,
+                height: 1.6,
+                frame: 0,
+                frames_x: 1,
+                frames_y: 1,
+                anchor_y,
+                fullbright: 1,
+                selection_highlight: 0,
+                _pad1: 0.0,
+            };
+            let (min, max) = sprite_bounds(&sprite);
+            for turn in 0..24 {
+                let (a, b) = (turn as f32 * 0.27, turn as f32 * 0.61 - 1.0);
+                // An orthonormal right and up from two angles
+                let right = [a.cos(), 0.0, a.sin()];
+                let up = [-a.sin() * b.sin(), b.cos(), a.cos() * b.sin()];
+                for (x, y) in [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, 1.0)] {
+                    for k in 0..3 {
+                        let c = sprite.world_pos[k]
+                            + right[k] * x * sprite.width
+                            + up[k] * (y - anchor_y) * sprite.height;
+                        assert!(
+                            c >= min[k] - 1e-5 && c <= max[k] + 1e-5,
+                            "anchor {anchor_y}, turn {turn}: corner {k} {c} outside {min:?}..{max:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The Rust uniform is laid out as the WGSL `MaskDraw` reads it (#397

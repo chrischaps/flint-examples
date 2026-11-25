@@ -247,6 +247,52 @@ fn engine_schemas() -> Option<PathBuf> {
     dir.join("components").is_dir().then_some(dir)
 }
 
+/// Where a package's schemas go in a bundle: beside the engine schema
+/// directory packed at `at`, as the engine's tree keeps them
+/// (`engine/schemas` -> `engine/packages/living/schemas`; #1332).
+fn package_key(at: &str, package: &str) -> String {
+    let engine = Path::new(at).parent().unwrap_or(Path::new(""));
+    normalize(
+        &engine
+            .join(flint_core::package::PACKAGES_DIR)
+            .join(package)
+            .join(flint_core::project::PACKAGE_SCHEMAS_DIR),
+    )
+}
+
+/// Mounts each package's schemas beside every engine schema directory a game
+/// packs: a mount's, or one of `listed` in the game's own tree (a subtree's
+/// `engine/schemas`), and returns, for each such directory's bundle path,
+/// the package directories it brings, in order. A listed path outside the
+/// game (`../schemas`) isn't packed, so it brings nothing either.
+fn mount_package_schemas(
+    root: &Path,
+    listed: &[String],
+    mounts: &mut BTreeMap<String, PathBuf>,
+) -> BTreeMap<String, Vec<String>> {
+    let inside = |s: &&String| !s.starts_with("..") && !Path::new(s.as_str()).is_absolute();
+    let engines: Vec<(String, PathBuf)> = mounts
+        .iter()
+        .map(|(at, dir)| (at.clone(), dir.clone()))
+        .chain(
+            listed
+                .iter()
+                .filter(inside)
+                .filter(|s| !mounts.contains_key(s.as_str()))
+                .map(|s| (s.clone(), root.join(s))),
+        )
+        .collect();
+    let mut brought: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (at, dir) in engines {
+        for (package, from) in flint_core::project::package_schema_dirs(&dir) {
+            let key = package_key(&at, &package);
+            mounts.entry(key.clone()).or_insert(from);
+            brought.entry(at.clone()).or_default().push(key);
+        }
+    }
+    brought
+}
+
 impl BundleConfig {
     fn parse(text: &str) -> Result<Self> {
         let mut config: Self = toml::from_str(text)?;
@@ -421,14 +467,24 @@ fn collect_under(root: &Path, rules: &Rules) -> Result<Vec<String>> {
 /// player will read them: every scene loads from the bundle with its
 /// prefabs and its archetypes known, every file and asset a scene, prefab,
 /// particle effect, glyph set, chunk, user style or script names is packed,
-/// and the user styles and looks load ([`Checks::BUNDLE`]).
+/// and the user styles and looks load ([`Checks::BUNDLE`]). The packed
+/// `flint.toml`'s `[project.diagnostics] allow` (#795) leaves out what it
+/// names, from the reference pass as from each scene's check (#1060), so
+/// a bundle refuses what `flint check` reports and nothing more.
 pub fn check_packed(files: &BTreeMap<String, Vec<u8>>, schemas: &[String]) -> check::Report {
     let source: MemorySource = files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
-    let subject = Subject::packed(
+    let mut subject = Subject::packed(
         files.keys().cloned().collect(),
         Schemas::Listed(schemas.to_vec()),
     );
-    vfs::scoped(Arc::new(source), || check::run(&subject, Checks::BUNDLE))
+    vfs::scoped(Arc::new(source), || {
+        // A manifest that doesn't read was refused when the pack read its
+        // name and start scene; with none packed, nothing is allowed
+        if let Ok(project) = Project::for_path(Path::new(".")) {
+            subject.allow = project.allow;
+        }
+        check::run(&subject, Checks::BUNDLE)
+    })
 }
 
 /// Add to `files` the guarded module of every packed user style's pass
@@ -514,6 +570,9 @@ pub struct Packed {
     pub files: Vec<(String, u64)>,
     /// Where they went.
     pub out_dir: PathBuf,
+    /// How many diagnostics `[project.diagnostics] allow` left out of the
+    /// check, counted as `flint check` counts them (#1060).
+    pub allowed: usize,
 }
 
 pub fn run(args: BundleArgs) -> Result<()> {
@@ -527,6 +586,7 @@ pub fn run(args: BundleArgs) -> Result<()> {
             "scene": packed.scene,
             "out_dir": packed.out_dir.display().to_string().replace('\\', "/"),
             "dry_run": dry_run,
+            "allowed": packed.allowed,
             "files": packed.files.iter().map(|(file, bytes)| {
                 serde_json::json!({ "file": file, "bytes": bytes })
             }).collect::<Vec<_>>(),
@@ -598,6 +658,25 @@ fn gather_game(args: &BundleArgs) -> Result<Gathered> {
             mounts.insert("engine/schemas".into(), dir);
         }
     }
+    // bundle.toml's list, else the project manifest's (ADR 0114), else the
+    // game-repo layout, as bundle paths
+    let manifest_schemas: Option<Vec<String>> = (!project.schemas.is_empty()).then(|| {
+        project
+            .schemas
+            .iter()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect()
+    });
+    let listed: Vec<String> = match config.schemas.clone() {
+        Some(listed) => listed,
+        None => manifest_schemas.unwrap_or_else(|| vec!["engine/schemas".into(), "schemas".into()]),
+    }
+    .into_iter()
+    .map(|s| normalize(Path::new(&s)))
+    .collect();
+    // An engine schema directory brings its packages' schemas (#1332): each
+    // is packed beside it, where the engine's tree keeps it, and listed after it
+    let brought = mount_package_schemas(root, &listed, &mut mounts);
 
     let paths = collect(root, &rules, &mounts)?;
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -633,23 +712,18 @@ fn gather_game(args: &BundleArgs) -> Result<Gathered> {
     if !files.contains_key(&scene) {
         bail!("the start scene {scene} is not packed");
     }
-    // bundle.toml's list, else the project manifest's (ADR 0114), else the
-    // game-repo layout; as bundle paths, and only those that were packed
-    let manifest_schemas: Option<Vec<String>> = (!project.schemas.is_empty()).then(|| {
-        project
-            .schemas
-            .iter()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect()
-    });
-    let schemas: Vec<String> = match config.schemas.clone() {
-        Some(listed) => listed,
-        None => manifest_schemas.unwrap_or_else(|| vec!["engine/schemas".into(), "schemas".into()]),
+    // The list with each engine directory's packages after it, and only
+    // the directories that were packed
+    let mut schemas: Vec<String> = Vec::new();
+    for dir in listed {
+        let packages = brought.get(&dir).cloned().unwrap_or_default();
+        for dir in std::iter::once(dir).chain(packages) {
+            if !schemas.contains(&dir) {
+                schemas.push(dir);
+            }
+        }
     }
-    .into_iter()
-    .map(|s| normalize(Path::new(&s)))
-    .filter(|s| files.keys().any(|p| p.starts_with(&format!("{s}/"))))
-    .collect();
+    schemas.retain(|s| files.keys().any(|p| p.starts_with(&format!("{s}/"))));
 
     Ok(Gathered {
         name,
@@ -749,14 +823,24 @@ fn gather_scene(args: &BundleArgs) -> Result<Gathered> {
         .dirs;
     let mut mounts: BTreeMap<String, PathBuf> = BTreeMap::new();
     let mut schemas = Vec::new();
+    // Each engine directory's packages (#1332): their directories on the
+    // disk, and where they go beside it in the bundle
+    let mut brought: Vec<(PathBuf, String)> = Vec::new();
     for dir in &dirs {
         let at = match key_under(dir, &root) {
             Some(key) => key,
             None => {
-                // A game naming the engine's schemas by path: where its
-                // bundle.toml mounts them, else where a subtree would be
-                let mounted = config.mount.iter().find_map(|(at, from)| {
-                    same_dir(&root.join(from), dir).then(|| normalize(Path::new(at)))
+                // A package of an engine directory packed already goes
+                // beside it; a game naming the engine's schemas by path:
+                // where its bundle.toml mounts them, else where a subtree
+                // would be
+                let beside = brought
+                    .iter()
+                    .find_map(|(from, at)| same_dir(from, dir).then(|| at.clone()));
+                let mounted = beside.or_else(|| {
+                    config.mount.iter().find_map(|(at, from)| {
+                        same_dir(&root.join(from), dir).then(|| normalize(Path::new(at)))
+                    })
                 });
                 let at = mounted.unwrap_or_else(|| match mounts.contains_key("engine/schemas") {
                     false => "engine/schemas".into(),
@@ -766,6 +850,9 @@ fn gather_scene(args: &BundleArgs) -> Result<Gathered> {
                 at
             }
         };
+        for (package, from) in flint_core::project::package_schema_dirs(dir) {
+            brought.push((from, package_key(&at, &package)));
+        }
         // All of it but notes and dotfiles: the directory was asked for
         for rel in files_under(dir)? {
             if !rel.split('/').any(|s| s.starts_with('.')) && !rel.ends_with(".md") {
@@ -780,11 +867,18 @@ fn gather_scene(args: &BundleArgs) -> Result<Gathered> {
                 "{scene} resolves no schemas: packing the engine's, from {}",
                 dir.display()
             );
-            for rel in files_under(&dir)? {
-                paths.insert(join_key("engine/schemas", &rel), dir.join(&rel));
+            let packages = flint_core::project::package_schema_dirs(&dir);
+            let at = "engine/schemas".to_string();
+            let brought = packages
+                .into_iter()
+                .map(|(package, from)| (package_key(&at, &package), from));
+            for (at, dir) in std::iter::once((at.clone(), dir)).chain(brought) {
+                for rel in files_under(&dir)? {
+                    paths.insert(join_key(&at, &rel), dir.join(&rel));
+                }
+                mounts.insert(at.clone(), dir);
+                schemas.push(at);
             }
-            mounts.insert("engine/schemas".into(), dir);
-            schemas.push("engine/schemas".into());
         }
     }
 
@@ -1148,6 +1242,9 @@ fn write(gathered: Gathered, list: bool, dry_run: bool) -> Result<Packed> {
     written.insert(0, (file_name(&None), main.len(), bytes));
 
     crate::output::say!("{name}: starts {scene}; schemas {}", schemas.join(", "));
+    if report.allowed > 0 {
+        crate::output::say!("  check: {}", report.counts());
+    }
     for (file, count, bytes) in &written {
         crate::output::say!(
             "  {:<32} {:>4} files  {:>9}",
@@ -1163,6 +1260,7 @@ fn write(gathered: Gathered, list: bool, dry_run: bool) -> Result<Packed> {
             .map(|(file, _, bytes)| (file.clone(), bytes.len() as u64))
             .collect(),
         out_dir: out_dir.clone(),
+        allowed: report.allowed,
     };
     if dry_run {
         crate::output::say!("(dry run: nothing written)");

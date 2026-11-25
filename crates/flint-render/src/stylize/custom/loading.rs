@@ -35,7 +35,7 @@ pub(crate) struct Loaded {
 
 /// A style's bind cache keys, pass labels and target names. The same
 /// names for every install of a style, interned: an install is told from
-/// another by its generation, which [`StyleFrame`] mixes into each key
+/// another by its generation, which [`StyleFrame`] files each group under
 /// (#742).
 #[derive(Clone)]
 pub(super) struct BindNames {
@@ -45,16 +45,6 @@ pub(super) struct BindNames {
     /// Each target's texture names (#412): two for history (ping-ponged),
     /// else the same one twice.
     pub(super) targets: Vec<[&'static str; 2]>,
-}
-
-impl BindNames {
-    /// Every name the chain's bind cache keeps a group under. The pass
-    /// labels and target textures aren't cache keys.
-    pub(super) fn bind_groups(&self) -> impl Iterator<Item = &'static str> + '_ {
-        [self.input, self.extra]
-            .into_iter()
-            .chain(self.passes.iter().flat_map(|p| [p.frame, p.targets]))
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -243,8 +233,19 @@ impl StyleRegistry {
 
     /// The loaded style whose description is the file at `path`.
     pub(super) fn loaded_from(&self, path: &Path) -> Option<Arc<Loaded>> {
+        // The spelling first: the reload poll asks this of every file in
+        // every style folder, a few times a second on the frame thread, and
+        // lists them from the folders the load read them from, so a loaded
+        // file is spelled the same. `same_path` on a mismatch asks the
+        // working directory and the disk (`anchor`): with the frame's other
+        // threads busy on files that took 16-37 ms a style and stopped the
+        // looks tour 150-200 ms a poll (#1121)
         self.users()
-            .find(|l| flint_core::project::same_path(&l.source.toml_path, path))
+            .find(|l| l.source.toml_path == path)
+            .or_else(|| {
+                self.users()
+                    .find(|l| flint_core::project::same_path(&l.source.toml_path, path))
+            })
             .cloned()
     }
 
@@ -262,15 +263,11 @@ impl StyleRegistry {
             .iter()
             .position(|s| replace && s.is_user() && s.name == loaded.descriptor.name);
         match at {
-            Some(i) => {
-                let old = std::mem::replace(&mut self.styles[i], Style::user(loaded));
-                // The old install's groups bind the old pass's buffers and no
-                // one asks for its keys again: every cache drops them at its
-                // next frame, not at the next resize (#427)
-                if let Some(old) = old.loaded() {
-                    crate::bind_cache::retire(old.names.bind_groups());
-                }
-            }
+            // The old install's groups bind the old pass's buffers and no
+            // one asks for them again: a renderer drawing with this registry
+            // drops them at its next frame, not at the next resize, since its
+            // registry no longer holds that install (#427, #1271)
+            Some(i) => self.styles[i] = Style::user(loaded),
             None => self.styles.push(Style::user(loaded)),
         }
     }
@@ -334,7 +331,18 @@ impl StyleRegistry {
             // one that counts: `Project::list`'s rule, read through
             // `file_watch` so the poll never waits on the disk (#633)
             let mut seen = std::collections::HashSet::new();
-            for dir in style_dirs(scope) {
+            // The folders are the scope's paths alone, existing or not, so
+            // they are worked out once a scope rather than every poll: the
+            // working out asks the working directory and the disk
+            if self.poll_dirs.as_ref().is_none_or(|(s, _)| s != scope) {
+                self.poll_dirs = Some((scope.clone(), style_dirs(scope)));
+            }
+            let dirs = self
+                .poll_dirs
+                .as_ref()
+                .map(|(_, d)| d.clone())
+                .unwrap_or_default();
+            for dir in dirs {
                 let Some(mut entries) = flint_core::file_watch::list(&dir) else {
                     continue;
                 };
@@ -762,7 +770,7 @@ pub(super) fn build_loaded(source: StyleSource, messages: &mut Vec<String>) -> L
         built
     };
     // Each install is a generation of its own, which the chain's bind cache
-    // keys mix in (`StyleFrame::bind`): a replaced style (#275) builds new
+    // files groups under (`StyleFrame::bind`): a replaced style (#275) builds new
     // buffers and layouts, and a group kept for the old install would bind
     // the old pass's buffers (frozen at the old values, or the wrong size
     // for a new param count). A counter, from 1: 0 is a native style's

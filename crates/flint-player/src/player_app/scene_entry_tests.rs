@@ -117,6 +117,7 @@ fn started_in_a(gpu: Option<&'static HeadlessContext>) -> PlayerApp {
             dirs: Vec::new(),
             source: SchemaSource::Flags,
             dropped: Vec::new(),
+            packages: None,
         },
     );
     if let Some(gpu) = gpu {
@@ -201,6 +202,7 @@ fn a_scene_that_cannot_load_leaves_the_current_one_and_fails_the_run() {
         // back to idle (#362), not stuck loading
         app.transition_phase = super::TransitionPhase::Loading {
             target_scene: "missing.scene.toml".into(),
+            covered: false,
         };
         app.advance_transition();
         assert!(matches!(app.transition_phase, super::TransitionPhase::Idle));
@@ -229,6 +231,7 @@ fn a_scene_that_cannot_load_fades_back_in_over_the_current_one() {
 
         app.transition_phase = super::TransitionPhase::Loading {
             target_scene: "missing.scene.toml".into(),
+            covered: false,
         };
         app.advance_transition();
         assert_eq!(app.core.scene_path, A, "the scene playing is kept");
@@ -289,7 +292,7 @@ fn a_look_fades(gpu: &'static HeadlessContext) {
         "nothing moves before a step"
     );
 
-    app.step_look_fade(1.0);
+    app.lay_look_fade(1.0);
     let half = drawn(&app);
     assert!(half.styles.is_enabled("watercolor"));
     assert!(
@@ -302,7 +305,7 @@ fn a_look_fades(gpu: &'static HeadlessContext) {
     );
     assert!(app.core.events.drain().is_empty(), "no arrival yet");
 
-    app.step_look_fade(1.5);
+    app.lay_look_fade(2.5);
     assert!(!app.look_fading());
     let arrived: Vec<_> = app
         .core
@@ -330,7 +333,7 @@ fn a_look_fades(gpu: &'static HeadlessContext) {
 
     // A cut during a fade takes over at once
     app.fade_to_look(None, 3.0).unwrap();
-    app.step_look_fade(0.5);
+    app.lay_look_fade(0.5);
     assert!(app.look_fading());
     app.set_look(Some("graphite")).unwrap();
     assert!(!app.look_fading());
@@ -443,6 +446,7 @@ fn fonts_resolve_beside_the_scene_a_transition_reaches() {
                 dirs: Vec::new(),
                 source: SchemaSource::Flags,
                 dropped: Vec::new(),
+                packages: None,
             },
         );
         app.scene_renderer = Some(SceneRenderer::new_headless(

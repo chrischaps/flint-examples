@@ -81,6 +81,9 @@ pub mod codes {
     /// `collider` with no `rigidbody`. Found by the system that reads it,
     /// while the game runs (#685).
     pub const NEEDS_COMPONENT: &str = "needs-component";
+    /// A `character_controller` on a second entity: one is the player, the
+    /// first by name, and the others' are never read (#1212).
+    pub const SECOND_PLAYER: &str = "second-player";
     /// An `entity` field (or an entity's `parent`) that names no entity of
     /// the scene. An empty string is "not set" and passes.
     pub const UNKNOWN_ENTITY: &str = "unknown-entity";
@@ -140,6 +143,15 @@ pub mod codes {
     pub const SCENE_LOAD: &str = "scene-load";
     /// `flint.toml` does not read.
     pub const BAD_MANIFEST: &str = "bad-manifest";
+    /// A package's `package.toml` does not read, or claims what another
+    /// package's does (ADR 0136 decision 8, #1331).
+    pub const BAD_PACKAGE: &str = "bad-package";
+    /// A component, scene table or script function of a package the
+    /// project's `[packages]` leaves out (ADR 0136 decision 9, #1334).
+    pub const UNLISTED_PACKAGE: &str = "unlisted-package";
+    /// A package the project's `[packages]` lists that the running binary
+    /// was built without (#1335): `flint build` builds one with it.
+    pub const UNBUILT_PACKAGE: &str = "unbuilt-package";
     /// A schema directory is missing, or a schema file does not read.
     pub const BAD_SCHEMAS: &str = "bad-schemas";
     /// A constraint file does not read, or a constraint's query does not
@@ -158,6 +170,9 @@ pub mod codes {
     /// A `[living.species.<spec>]` table is wrong, or no living prop grows
     /// from that spec.
     pub const BAD_SPECIES: &str = "bad-species";
+    /// A field the scene declares (`[field.<name>]`, #1014) has a key or
+    /// zone that is wrong, named by the field and the key or zone.
+    pub const BAD_FIELD: &str = "bad-field";
     /// An input config a scene or the manifest names does not parse.
     pub const BAD_INPUT_CONFIG: &str = "bad-input-config";
     /// A procgen spec a scene's model or texture is made from does not parse.
@@ -216,6 +231,9 @@ pub mod codes {
     /// literals, which takes Rhai's slow signature search (ADR 0116
     /// decision 5).
     pub const MIXED_NUMBERS: &str = "mixed-numbers";
+    /// A `global::NAME` read in a script with no top-level `const NAME`,
+    /// which fails every call that reaches it (#1007).
+    pub const UNKNOWN_GLOBAL: &str = "unknown-global";
 
     /// Every code, the severity it is raised with, and what it means.
     pub const ALL: &[(&str, Severity, &str)] = &[
@@ -280,6 +298,11 @@ pub mod codes {
             "a component that does nothing without another the entity lacks",
         ),
         (
+            SECOND_PLAYER,
+            Severity::Warning,
+            "a character_controller on an entity that is not the player",
+        ),
+        (
             UNKNOWN_ENTITY,
             Severity::Error,
             "an entity reference that names no entity in the scene",
@@ -331,6 +354,21 @@ pub mod codes {
         ),
         (BAD_MANIFEST, Severity::Error, "flint.toml does not read"),
         (
+            BAD_PACKAGE,
+            Severity::Error,
+            "a package.toml does not read, or provides what another package does",
+        ),
+        (
+            UNLISTED_PACKAGE,
+            Severity::Error,
+            "a scene or script uses a package flint.toml's [packages] leaves out",
+        ),
+        (
+            UNBUILT_PACKAGE,
+            Severity::Error,
+            "flint.toml's [packages] lists a package this binary was built without",
+        ),
+        (
             BAD_SCHEMAS,
             Severity::Error,
             "a schema directory is missing, or a schema file does not read",
@@ -369,6 +407,11 @@ pub mod codes {
             BAD_SPECIES,
             Severity::Error,
             "a [living.species] table is wrong, or names a spec no living prop grows from",
+        ),
+        (
+            BAD_FIELD,
+            Severity::Error,
+            "a [field.<name>] table the scene declares has a key or zone that is wrong",
         ),
         (
             BAD_INPUT_CONFIG,
@@ -450,6 +493,11 @@ pub mod codes {
             MIXED_NUMBERS,
             Severity::Warning,
             "a per-frame call mixes int and float literals where numbers go, the slow lookup",
+        ),
+        (
+            UNKNOWN_GLOBAL,
+            Severity::Error,
+            "a script reads global::NAME and has no top-level const NAME",
         ),
         (
             UNKNOWN_TABLE,
@@ -592,21 +640,23 @@ impl Diagnostic {
     }
 
     /// Where it is, without the file: `entity 'crate' collider.friction`,
-    /// or `[post_process] bloom_intensity` for a scene-level table. Empty
-    /// when the diagnostic is about the file as a whole.
+    /// or `[post_process] bloom_intensity` for a scene-level table, each
+    /// after its `line:column` when it has one (`5:1 [living] shadowz`,
+    /// #1061). Empty when the diagnostic is about the file as a whole.
     pub fn location(&self) -> String {
-        if let Some(table) = &self.table {
-            return match &self.field {
-                Some(field) => format!("[{table}] {field}"),
-                None => format!("[{table}]"),
-            };
-        }
         let mut parts = Vec::new();
         if let Some(line) = self.line {
             parts.push(match self.column {
                 Some(column) => format!("{line}:{column}"),
                 None => format!("line {line}"),
             });
+        }
+        if let Some(table) = &self.table {
+            parts.push(match &self.field {
+                Some(field) => format!("[{table}] {field}"),
+                None => format!("[{table}]"),
+            });
+            return parts.join(" ");
         }
         if let Some(entity) = &self.entity {
             parts.push(format!("entity '{entity}'"));
@@ -700,13 +750,30 @@ pub fn counts_line(diagnostics: &[Diagnostic]) -> String {
 /// left out. Empty when there is nothing to say. `scene` names what was
 /// loaded.
 pub fn summary_lines(scene: &str, diagnostics: &[Diagnostic], limit: usize) -> Vec<String> {
+    summary_lines_of(
+        scene,
+        &format!("flint validate {scene}"),
+        diagnostics,
+        limit,
+    )
+}
+
+/// [`summary_lines`] about something other than a scene (a schema file the
+/// player read, #1064): `subject` names it, and `full_list` is the command
+/// that prints every diagnostic of it.
+pub fn summary_lines_of(
+    subject: &str,
+    full_list: &str,
+    diagnostics: &[Diagnostic],
+    limit: usize,
+) -> Vec<String> {
     if diagnostics.is_empty() {
         return Vec::new();
     }
     let mut ordered = diagnostics.to_vec();
     sort_errors_first(&mut ordered);
     let mut lines = vec![format!(
-        "{scene}: {} (the full list: flint validate {scene})",
+        "{subject}: {} (the full list: {full_list})",
         counts_line(diagnostics)
     )];
     for d in ordered.iter().take(limit) {
@@ -733,6 +800,13 @@ pub fn log_summary(scene: &str, diagnostics: &[Diagnostic]) {
     }
 }
 
+/// [`summary_lines_of`] through `tracing::warn!`, as [`log_summary`].
+pub fn log_summary_of(subject: &str, full_list: &str, diagnostics: &[Diagnostic]) {
+    for line in summary_lines_of(subject, full_list, diagnostics, SUMMARY_LIMIT) {
+        tracing::warn!("{line}");
+    }
+}
+
 /// Codes a project may not allow: each says the file did not load, so
 /// there is nothing behind it to check, and allowing it would pass a scene
 /// that does not play.
@@ -741,6 +815,7 @@ pub const NOT_ALLOWABLE: &[&str] = &[
     codes::FILE_UNREADABLE,
     codes::SCENE_LOAD,
     codes::BAD_MANIFEST,
+    codes::BAD_PACKAGE,
     codes::BAD_PREFAB,
 ];
 
@@ -982,7 +1057,7 @@ mod tests {
                 "{code} is not kebab-case"
             );
         }
-        assert_eq!(seen.len(), 53);
+        assert_eq!(seen.len(), 59);
     }
 
     /// A problem in a scene-level table names the table as its header is
@@ -1039,6 +1114,13 @@ mod tests {
         assert_eq!(lines[2], "  warning[unknown-field]: w0");
         assert_eq!(lines[4], "  ... and 5 more");
         assert!(summary_lines("a", &[], 3).is_empty());
+        // Of a schema file (#1064): the same lines, another pointer
+        let of = summary_lines_of("schemas/components/a.toml", "flint check", &list, 3);
+        assert_eq!(
+            of[0],
+            "schemas/components/a.toml: 1 error, 7 warnings (the full list: flint check)"
+        );
+        assert_eq!(of[1..], lines[1..]);
     }
 
     #[test]

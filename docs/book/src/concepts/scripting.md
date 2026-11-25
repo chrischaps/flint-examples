@@ -1,5 +1,7 @@
 # Scripting
 
+> **Package:** `engine`, the kernel: every game has it ([Packages](packages.md)).
+
 Flint's scripting system provides runtime game logic through [Rhai](https://rhai.rs/), a lightweight embedded scripting language. Scripts can read and write entity data, respond to game events, control animation and audio, and hot-reload while the game is running.
 
 ## Overview
@@ -168,6 +170,16 @@ Every number in the Entity API takes an integer as well as a float: `set_positio
 
 Any other transform field goes through `set_field`, e.g. `set_field(id, "transform", "scale", [2.0, 1.0, 2.0])`; `set_position`, `set_rotation` and `set_scale` are that with the numbers checked for you.
 
+An entity a script spawns draws its model. Give it one in the same callback as the spawn and the player loads it at the end of that frame, after `on_draw_ui`, through the same search a scene's models use (the asset catalog, then a procgen spec of that name, then the file), with its textures and, for a skinned model, its skeleton:
+
+```rhai
+let bolt = spawn_entity("bolt_" + count);
+set_position(bolt, x, 1.0, z);
+set_field(bolt, "model", "asset", "bolt");
+```
+
+The file is read once. A later spawn of the same asset draws the mesh already loaded, and a model of several nodes gives each new entity its own children from the import it kept. A name the search can't find is warned about once a scene, not once a spawn. Only the frame an entity is spawned on counts: a `model` set on an entity spawned in an earlier frame, or an `asset` changed later, is not loaded. The player does this (`flint play`, `flint-player`, the web); a `flint render --scripts` capture draws only the models its scene loaded.
+
 A function given an entity that isn't there does nothing, and says so once. `get_entity` returns `-1` for a name it can't find (an entity a scene builder hasn't made yet, say), and every function with an entity parameter (the Entity API, `play_clip` and the rest of the Animation API, `audio_position`, `set_velocity_2d`, `get_velocity_2d`, `move_character`, `get_collider_extents`, `camera_follow`, the Sprite API, the screen-UI setters `set_text`, `set_text_color`, `set_fill`, `set_anchor` and `set_anchor_offset`, the particle emitter calls, the Style API's entity functions and the Spline API) given it, or a despawned id, logs a warning the first time for each script and function: `seeded_stars.rhai: line 17: set_position(-1, ...) did nothing: there is no entity -1 (-1 is what get_entity returns for a name it can't find)`. A setter that queues work for the engine, like `set_velocity_2d`, `emit_burst` or `set_entity_style`, queues nothing. A getter returns its empty value as well (`#{}`, `()`, `""`, `false`, `0`; `get_parent` gives `-1`, `audio_position` `-1.0` and `distance` the largest float), and warns too. `entity_exists(id)` never warns: test with it where a missing entity is expected.
 
 #### Lists come in name order
@@ -247,7 +259,7 @@ fn last_key() { global::KEYS[global::KEYS.len() - 1] }   // a helper reads the c
 fn on_update() { let k = last_key(); }
 ```
 
-A `let` is not a constant, so `global::` doesn't reach it. Each constant a script reads as `global::` is handed to every callback again, about half a microsecond each for a small array, so a callback itself can read the bare name, which costs nothing extra; `global::` is for the helpers. `crates/flint-script/src/engine.rs`'s `test_top_level_state_reaches_callbacks_not_helpers` holds all of this.
+A `let` is not a constant, so `global::` doesn't reach it: `flint script check` reports such a read as `unknown-global` (below), since it would fail every frame. Each constant a script reads as `global::` is handed to every callback again, about half a microsecond each for a small array, so a callback itself can read the bare name, which costs nothing extra; `global::` is for the helpers. `crates/flint-script/src/engine/tests.rs`'s `test_top_level_state_reaches_callbacks_not_helpers` and `engine/top_level_tests.rs` hold all of this.
 
 ### Input API
 
@@ -301,11 +313,11 @@ Audio functions produce deferred commands that the player processes after the sc
 
 | Function | Returns | Description |
 |---|---|---|
-| `play_sound(name: str)` | `int`: its handle, for `stop_sound` and `set_sound_volume` | Play a sound at full volume, not placed in the world. |
-| `play_sound(name: str, volume_or_opts: any)` | `int`: its handle, for `stop_sound` and `set_sound_volume` | Play a sound, not placed in the world: a volume (0..1), or a map of any of volume, pitch, looping (until `stop_sound`), bus (sfx, music or one the game declares). |
-| `play_sound(name: str, volume: num, pitch: num)` | `int`: its handle, for `stop_sound` and `set_sound_volume` | Play a sound at a volume and a pitch multiplier, not placed in the world. |
-| `play_sound_at(name: str, x: num, y: num, z: num, volume_or_opts: any)` | `int`: its handle, for `stop_sound` and `set_sound_volume` | Play a sound at a point: a volume, or a map of any of volume, pitch, looping, bus, `min_distance`, `max_distance`, rolloff. |
-| `play_sound_at(name: str, x: num, y: num, z: num, volume: num, pitch: num)` | `int`: its handle, for `stop_sound` and `set_sound_volume` | Play a sound at a point, at a volume and a pitch multiplier. |
+| `play_sound(name: str)` | `int`: its handle, for `stop_sound`, `set_sound_volume` and `is_sound_playing` | Play a sound at full volume, not placed in the world. |
+| `play_sound(name: str, volume_or_opts: any)` | `int`: its handle, for `stop_sound`, `set_sound_volume` and `is_sound_playing` | Play a sound, not placed in the world: a volume (0..1), or a map of any of volume, pitch, looping (until `stop_sound`), bus (sfx, music or one the game declares). |
+| `play_sound(name: str, volume: num, pitch: num)` | `int`: its handle, for `stop_sound`, `set_sound_volume` and `is_sound_playing` | Play a sound at a volume and a pitch multiplier, not placed in the world. |
+| `play_sound_at(name: str, x: num, y: num, z: num, volume_or_opts: any)` | `int`: its handle, for `stop_sound`, `set_sound_volume` and `is_sound_playing` | Play a sound at a point: a volume, or a map of any of volume, pitch, looping, bus, `min_distance`, `max_distance`, rolloff. |
+| `play_sound_at(name: str, x: num, y: num, z: num, volume: num, pitch: num)` | `int`: its handle, for `stop_sound`, `set_sound_volume` and `is_sound_playing` | Play a sound at a point, at a volume and a pitch multiplier. |
 | `stop_sound(sound: any)` | — | Stop a sound a script started: its handle, or a name for every one playing it. |
 | `stop_sound(sound: any, fade: num)` | — | Stop a sound a script started (a handle or a name), fading out over seconds. |
 | `set_sound_volume(handle: int, volume: num)` | — | Set the volume (0..1) of a sound a script started, by its handle. |
@@ -325,7 +337,7 @@ play_sound("whoosh.ogg", 0.8);
 play_sound("whoosh", 0.8);
 ```
 
-A name cached as written always wins, so a sound an extension loaded as `"blip"` stays `"blip"`, and two files that share a stem (`whoosh.ogg`, `whoosh.wav`) want the full path. A one-shot naming a sound that is not there plays nothing and logs a warning that names the nearest cached sound:
+A name cached as written always wins, so a sound an extension loaded as `"blip"` stays `"blip"`, and two files that share a stem (`whoosh.ogg`, `whoosh.wav`) want the full path. A name nothing cached is looked for on its first play as an `audio_source.file` is, from the scene's folder up to the project root, so `play_sound("../sfx/door.ogg")` plays a file outside `audio/`; `flint check` holds sound strings to that search ([Sound names](audio.md#sound-names)). A one-shot naming a sound that is not there plays nothing and logs a warning that names the nearest cached sound:
 
 ```text
 WARN script: play_sound error: AudioError("Sound not cached: whosh (nearest: \"audio/whoosh.ogg\")")
@@ -356,6 +368,7 @@ Animation functions write directly to the `animator` component on the target ent
 | `play_clip(id: entity, clip: str)` | — | Play a named clip on the entity's animator: a new clip cuts to its start (cancelling a crossfade), a stopped one resumes, a finished one-shot replays. |
 | `stop_clip(id: entity)` | — | Pause the entity's animator: its clip holds the current frame (layers keep their own clocks). |
 | `blend_to(id: entity, clip: str, duration: num)` | — | Crossfade to another clip over a duration in seconds. |
+| `blend_to(id: entity, clip: str, duration: num, easing: str)` | — | Crossfade to another clip over seconds, eased: linear, smooth, `ease_in`, `ease_out` or `ease_in_out` (later crossfades keep it). |
 | `set_anim_speed(id: entity, speed: num)` | — | Set the animator's playback speed (1 normal). |
 | `set_anim_layer(id: entity, index: int, clip: str, weight: num)` | — | Play a clip on layer \`index\`, additive and unmasked, at a weight. |
 | `set_anim_layer(id: entity, index: int, clip: str, weight: num, opts: map)` | — | Play a clip on layer \`index\` at a weight; opts: mode ("additive", the default, or "override"), mask (a root joint; "" unmasked). |
@@ -409,6 +422,8 @@ Use the direction helpers (`forward_from_yaw`, `right_from_yaw`) to convert a ya
 | `forward_from_yaw(yaw_degrees: num)` | `map`: `#{x, y, z}`, y 0 | The forward direction (-Z at yaw 0) turned by a yaw in degrees about +Y. |
 | `right_from_yaw(yaw_degrees: num)` | `map`: `#{x, y, z}`, y 0 | The right direction (+X at yaw 0) turned by a yaw in degrees about +Y. |
 | `wrap_angle(degrees: num)` | `num` | Degrees brought into \[0, 360). |
+| `noise(x: num)` | `num`: -1..1 | Smooth noise of x in -1..1, about one swing a unit, 0 at whole x: the same every run. |
+| `noise(x: num, seed: int)` | `num`: -1..1 | \`noise\` from another seed: another curve. |
 | `random()` | `num`: in \[0, 1) | The next number of the engine's one random sequence, every script's draws in turn. |
 | `random_range(min: num, max: num)` | `num`: in \[min, max) | A random number between two, from the same sequence. |
 | `seed_random(seed: int)` | — | Restart every script's random sequence at a seed, as --seed does; call it in `on_init`, not at the top. |
@@ -701,7 +716,7 @@ Rhai's own `print(x)` and `debug(x)` go to the same log, at info level, naming t
 
 Physics functions provide raycasting and camera access for combat, line-of-sight checks, and interaction targeting:
 
-<!-- script-api:begin raycast collision_layers move_character get_collider_extents set_joint_target get_joint_target get_joint_position get_camera_position get_camera_direction set_camera_position set_camera_target set_camera_fov set_camera_orthographic set_camera_ortho_height set_camera_roll -->
+<!-- script-api:begin raycast collision_layers set_collision_layer set_collision_mask move_character get_collider_extents set_joint_target get_joint_target get_joint_position get_camera_position get_camera_direction set_camera_position set_camera_target set_camera_fov set_camera_orthographic set_camera_ortho_height set_camera_roll -->
 <!-- Generated by `flint script api --book` from the engine's declarations (crates/flint-script/src/api/, or the ScriptModule of a feature that owns its module): edit the doc there, not here. CI's headless job runs --check-book. -->
 
 | Function | Returns | Description |
@@ -709,9 +724,11 @@ Physics functions provide raycasting and camera access for combat, line-of-sight
 | `raycast(ox: num, oy: num, oz: num, dx: num, dy: num, dz: num, max_dist: num)` | `map`: `#{entity, distance, point_x, point_y, point_z, normal_x, normal_y, normal_z}`, or () for no hit or no physics | The nearest collider a ray meets, the calling entity's own excluded. |
 | `raycast(ox: num, oy: num, oz: num, dx: num, dy: num, dz: num, max_dist: num, mask: any)` | `map`: `#{entity, distance, point_x, point_y, point_z, normal_x, normal_y, normal_z}`, or () for no hit or no physics | The nearest collider on a layer of \`mask\` (a layer's name or an array of names) a ray meets, the calling entity's own excluded. |
 | `collision_layers()` | `array`: their names, \`default\` first; empty with no physics | The collision layers colliders and masks may name: \`default\`, then the project's. |
+| `set_collision_layer(id: entity, layer: str)` | — | Put an entity's collider on another collision layer, from the next physics step: a power-up that walks through walls, a corpse that stops blocking bullets. It writes \`collider.layer\`, as \``set_field`\` would, but an unknown layer is a script error here. |
+| `set_collision_mask(id: entity, mask: any)` | — | Change the layers an entity's collider meets (a layer's name or an array of names), from the next physics step. It writes \`collider.mask\`; an unknown layer is a script error here. |
 | `move_character(id: entity, dx: num, dy: num, dz: num)` | `map`: `#{x, y, z, grounded}`: where it ended up; () with no physics, transform or character collider | Move a character's collider by a step, sliding along what its collider's mask meets, from where the entity stands now. |
 | `move_character(id: entity, dx: num, dy: num, dz: num, mask: any)` | `map`: `#{x, y, z, grounded}`: where it ended up; () with no physics, transform or character collider | Move a character's collider by a step, sliding along what is on a layer of \`mask\` (a layer's name or an array of names) in place of its collider's mask. |
-| `get_collider_extents(id: entity)` | `map`: `#{shape: "box", half_x, half_y, half_z}`, `#{shape: "sphere", radius}`, `#{shape: "capsule"\|"cylinder", radius, half_height}` or `#{shape: "mesh"\|"convex", half_x, half_y, half_z, centre_x, centre_y, centre_z}` (its box); () with no collider or no physics | The shape and size of an entity's collider. |
+| `get_collider_extents(id: entity)` | `map`: `#{shape: "box", half_x, half_y, half_z}`, `#{shape: "sphere", radius}`, `#{shape: "capsule"\|"cylinder", radius, half_height}` or `#{shape: "mesh"\|"convex"\|"heightfield", half_x, half_y, half_z, centre_x, centre_y, centre_z}` (its box); () with no collider or no physics | The shape and size of an entity's collider. |
 | `set_joint_target(id: entity, value: num)` | — | Set the joint's motor target: degrees for a hinge or spherical, metres for prismatic. |
 | `get_joint_target(id: entity)` | `num`: 0 when it has none | The joint's motor target. |
 | `get_joint_position(id: entity)` | `num`: the coordinate, or () when there is no physics or no such joint | The simulated joint coordinate from its rest pose: hinge degrees or prismatic metres. |
@@ -863,6 +880,53 @@ Large 2D worlds stream in `.chunk.toml` files at runtime:
 
 <!-- script-api:end -->
 
+A chunk is a scene file whose entities join the world, each name prefixed with the chunk's id (`cave_card`) and moved by the offset. Its models, textures, colliders and scripts load with it, on the frame `load_chunk` is carried out: a model the scene never used is read then, found by the scene's search (the asset catalog, a procgen spec, then the file), and that frame's record says so (`model load models/card.glb`, inside its `chunk load`; see [Profiling](../guides/profiling.md)). A model the scene already loaded is drawn from what it loaded, with no read. `unload_chunk` despawns the chunk's entities and everything under them.
+
+### Camera Rig API
+
+A 3D camera for films and cutscenes (#1158): it flies a path through a list of points, leans into the path's turns, shakes in its own frame, can be held by hand, and cuts from a shot list. Everything runs on game time, so a `--frame-step` capture makes the same frames every run.
+
+<!-- script-api:begin module:camera_rig -->
+<!-- Generated by `flint script api --book` from the engine's declarations (crates/flint-script/src/api/, or the ScriptModule of a feature that owns its module): edit the doc there, not here. CI's headless job runs --check-book. -->
+
+| Function | Returns | Description |
+|---|---|---|
+| `camera_path(points: array, u: num)` | `map`: `#{x, y, z}` | The point u (0..1, by distance) of the way along a smooth path through a list of points. |
+| `camera_path(points: array, u: num, opts: map)` | `map`: `#{x, y, z}` | \``camera_path`\` with opts: \`closed\` (true runs from the last point back to the first, and u wraps). |
+| `camera_path_length(points: array)` | `num`: metres | The length of the path through a list of points, metres: divide a speed by it for u a second. |
+| `camera_path_length(points: array, opts: map)` | `num`: metres | \``camera_path_length`\` with opts: \`closed\`. |
+| `set_camera_on_path(points: array, u: num)` | — | Put the camera u (0..1, by distance) of the way along a smooth path through a list of points, looking along it. |
+| `set_camera_on_path(points: array, u: num, opts: map)` | — | \``set_camera_on_path`\` with opts: \``look_at`\` (a point, an entity or a second path at the same u), \``look_ahead`\` (metres along the path), \`bank\` (lean into turns; 5 rolls 45 degrees in a 5 m turn), \``max_bank`\` (degrees, 30), \`closed\`. |
+| `shake_view(amplitude: num, frequency: num, decay: num)` | — | Shake the 3D camera across its own view: an amplitude in metres (stacking on a shake under way), about how many swings a second, and a decay rate. |
+| `shake_view(amplitude: num, frequency: num, decay: num, opts: map)` | — | \``shake_view`\` with opts: \`degrees\` (its turn at the start; 10 a metre of amplitude unless given) and \`seed\`. |
+| `stop_view_shake()` | — | Stop the view shake at once. |
+| `set_hand_held(strength: num)` | — | Hold the 3D camera by hand from now on: a slow drift at a strength (1 a person holding it, 0 off). |
+| `set_hand_held(strength: num, opts: map)` | — | \``set_hand_held`\` with opts: \`steps\` (footfalls a second, for a walk's bob and sway; 0 stands) and \`seed\`. |
+| `shot(t: num, starts: array)` | `map`: `#{index, time, length, u, first, done}`: index -1 before the first; first is true on the frame a shot began | Which shot of a list game time t is in: \`starts\` is each shot's start, then the end of the last. |
+
+<!-- script-api:end -->
+
+- **A path** is a list of points, each `[x, y, z]` or `#{x, y, z}`, and `u` runs 0 to 1 along it **by distance**: the camera moves at an even speed however unevenly the points are spaced (`camera_path_length` turns a speed in metres a second into `u`). The curve is a centripetal Catmull-Rom through every point, which never loops back on itself near a short segment as a uniform one can. An open path holds its ends; `closed: true` runs from the last point back to the first and `u` wraps.
+- **Looking**: along the path by default; `look_ahead: 2.0` looks at the path 2 m ahead; `look_at` takes a point, an entity (its world position) or a second list of points sampled at the same `u` (a dolly whose target slides too).
+- **Banking**: `bank` sets how hard the camera leans: the roll's tangent is `bank` times the turn's curvature, one over its radius in metres, so `bank: 5.0` rolls 45 degrees in a 5 m turn and half that in a 10 m one. The curvature is measured over 3% of the path either side, so the roll eases in and out of each turn instead of jumping where two segments meet. `max_bank` (degrees, 30) caps it. With no `bank` the roll is left to the script.
+- **The shake** is `shake_camera`'s for a 3D camera: offsets along the camera's own right and up (never along its line of sight) and a small turn, from seeded noise, decaying exponentially from each kick and stacking on what is left. It is laid over whatever camera the scripts set this frame, after every script has set it, so it works with `set_camera_position` / `set_camera_target` as well as `set_camera_on_path`; only what a script set moves, so it never shakes the player's own camera. `set_hand_held(strength)` is a standing wander on top (centimetres and under a degree at 1), with a walk's footfall bob and side sway at `steps` a second. Both are cleared at a scene change.
+- **A shot list**: `shot(t, [0.0, 4.0, 9.5, 14.0])` is three shots, from 0 to 4, 4 to 9.5 and 9.5 to 14 s (the last number is the end). It returns the shot's `index` (-1 before the first; after the end the last, with `done` true), `time` into it, its `length`, `u` (`time / length`, held to 0..1), and `first`, true on the frame the shot began (for every call that frame), so a one-shot change (a look, an emitter, a kick) fires exactly once.
+- `noise(x)` / `noise(x, seed)` (the math module) is the rig's noise for a script's own wander: smooth, -1 to 1, about one swing a unit, 0 at whole `x`, the same on every run.
+
+```rust
+const PATH = [[0.0, 3.0, 12.0], [8.0, 4.0, 4.0], [0.0, 5.0, -6.0], [-8.0, 3.0, 2.0]];
+
+fn on_update() {
+    let s = shot(total_time(), [0.0, 6.0, 12.0]);
+    if s.index == 0 {
+        set_camera_on_path(global::PATH, s.u, #{ bank: 6.0, look_at: [0.0, 1.0, 0.0] });
+    } else {
+        set_camera_on_path(global::PATH, 1.0 - s.u, #{ look_ahead: 3.0 });
+    }
+    if s.first { shake_view(0.2, 14.0, 3.0); }   // a jolt on every cut
+}
+```
+
 ### Spline API
 
 Query spline entities for path-following, track layouts, and procedural placement:
@@ -915,7 +979,7 @@ See [Particles](particles.md) for full component schema and recipes.
 
 Turn an entity into glyphs at a story beat and animate how it looks (#269). These change the entity's per-entity style component (`ascii_style`), which the renderer reads every frame. See [Stylize Passes](stylize-passes.md#per-entity-ascii) for every setting.
 
-<!-- script-api:begin set_entity_style set_style_param tween_style_param clear_entity_style get_entity_style get_entity_style_variant get_style_param reset_style_history set_camera_cut_detection set_look clear_look get_look list_looks -->
+<!-- script-api:begin set_entity_style set_style_param tween_style_param clear_entity_style get_entity_style get_entity_style_variant get_style_param reset_style_history set_camera_cut_detection set_look clear_look prepare_look get_look list_looks -->
 <!-- Generated by `flint script api --book` from the engine's declarations (crates/flint-script/src/api/, or the ScriptModule of a feature that owns its module): edit the doc there, not here. CI's headless job runs --check-book. -->
 
 | Function | Returns | Description |
@@ -934,6 +998,7 @@ Turn an entity into glyphs at a story beat and animate how it looks (#269). Thes
 | `set_look(name: str, seconds: num)` | — | Cross-fade from the look drawn now to another over seconds of game time (numbers ease, a style in one look alone fades by its blend); `look_faded` fires on arrival. |
 | `clear_look()` | — | Take the look off: the scene's own post-processing keys alone. |
 | `clear_look(seconds: num)` | — | Fade the look off over seconds of game time, to the scene's own post-processing keys. |
+| `prepare_look(name: str)` | — | Build a look's styles on worker threads now, so the frame that later sets it doesn't stop to: call it well before the look is shown (`on_init`). |
 | `get_look()` | `str`: the look's name as it was asked for; "" for none | The look the scene draws with now: its own, or the last a script or F4 chose (a fade's target from its start). |
 | `list_looks()` | `array`: names, sorted | Every look the scene can see: its project's styles/\*.look.toml files and the built-ins, by name. |
 
@@ -949,6 +1014,7 @@ Turn an entity into glyphs at a story beat and animate how it looks (#269). Thes
 - `set_camera_cut_detection(enabled)`: Turn the player's own [cut detection](stylize-passes.md#camera-cuts) on or off (on by default). A script that calls `reset_style_history()` at its own cuts can turn it off
 - `set_look(name)`: Draw the whole frame in a [look](stylize-passes.md#looks-in-scenes-f4-and-scripts) (`"graphite"`, `"matrix"`, or a `styles/<name>.look.toml` beside the scene), laid under the scene's own `[post_process]` keys in place of the look it had (#356). `""` is no look. An unknown look is a warning and changes nothing. Call it once per change, not every frame: each call re-reads the look and replaces the post config
 - `set_look(name, seconds)` / `clear_look(seconds)`: The same change as a [cross-fade](stylize-passes.md#fading-from-one-look-to-the-next) over `seconds` of game time (#496), and `look_faded` fires to every script's `on_event` with `#{ look }` (`""` for none) when it arrives. `0` (or a negative number) is the cut. The look is the new one at once for every read; another `set_look` during the fade starts from wherever it has got to
+- `prepare_look(name)`: Build a look's styles on worker threads now, so the `set_look` that shows it later doesn't stop the game to build them (#1121). Nothing on screen changes and `get_look()` still answers the look drawn. Call it well before the look is shown, `on_init` being the usual place: the first ASCII look took about a second to build. A look that is built or building already costs nothing. On the web it builds at the call, so make it where a stop is hidden. See [Building a look before it is shown](stylize-passes.md#building-a-look-before-it-is-shown)
 - `get_look()` / `list_looks()`: The look the scene draws with now, and every look it can see (#497). `get_look()` is the name as it was asked for: the scene's `[post_process] look`, `--look`, or the last that a script's `set_look`, F4's Look picker or a transition chose; `""` for none, and a fade's target from its first frame. Like the style readers it sees the world as the script finds it: right after a `set_look` in the same call it still returns the old look, and from that frame's `on_draw_ui` on it returns the new one. A look that can't be found changes nothing, so it never answers a name that isn't drawn. `list_looks()` is the project's `styles/*.look.toml` files and the built-ins no file shadows, sorted by name, as F4 lists them, read at the scene's entry. A menu that cycles looks can step through `list_looks()` from `get_look()` instead of keeping a copy that F4 or a scene change would leave stale
 
 Calls are queued and applied after the frame's scripts, before the renderer reads the world, so a change shows the same frame. Each `set_entity_style` and each `clear_entity_style` that removed something fires `style_changed` to every script's `on_event`, with `#{ entity, style }` (`style` is `""` after a clear). A param change fires nothing, since it may come every frame.
@@ -1015,7 +1081,7 @@ The same for the scene's `[post_process.styles.<name>]` tables (#369): any regis
 <!-- script-api:end -->
 
 - `set_post_style_param(style, param, value)`: Change one setting: a number (`radius`, `cell`, `strength`, ...; clamped to the style's range, with a warning naming it, as `set_style_param`'s), a string option (`ramp`, `palette`, ...; one of its choices when the list is closed), a [colour](stylize-passes.md#colours) (`tint`), `enabled`, `order`, `feeds_bloom` (HDR styles), or `blend`, 0--1: how much of the style shows over what it read. Setting a param doesn't switch the style on
-- `set_post_style_param` also takes the [reveal](stylize-passes.md#revealing-a-whole-frame-style)'s keys (#406): `reveal`, 0--1, how much of the screen the style shows on, `reveal_shape` (`tear`, `wipe`, `iris`, `panel`), `reveal_ink`, `reveal_rim_color`, and the `reveal_*` numbers (`reveal_rim` and `reveal_shadow` among them, #876)
+- `set_post_style_param` also takes the [reveal](stylize-passes.md#revealing-a-whole-frame-style)'s keys (#406): `reveal`, 0--1, how much of the screen the style shows on, `reveal_shape` (`tear`, `wipe`, `iris`, `panel`), `reveal_invert` (`true` keeps the style outside the region, #1180), `reveal_ink`, `reveal_rim_color`, and the `reveal_*` numbers (`reveal_rim` and `reveal_shadow` among them, #876)
 - `tween_post_style_param(style, param, target, seconds[, easing])` (#406): the engine eases one number of a whole-frame style (`reveal`, `blend`, a `reveal_*` key or a parameter) from where it is to `target` over game seconds, as `tween_style_param` does for an entity ([Tweens](#tweens)), and fires `post_style_tween_done` with `#{ style, param }` at the end. A `reveal` the style doesn't have starts at 0, so the first frame is still the live one. A `set_post_style_param` of the same key stops it, and so do `reset_post_style` and a new scene
 - `reset_post_style(style)`: Put the style back to what the scene authored (with any `--style` words over it): on or off, and every value
 
@@ -1233,6 +1299,58 @@ Each script entity has its own clock, which counts beats where it last asked, fr
 A change the field can't use is logged by the player, naming the zone, and changes nothing. So does any of these in a scene with living props but no `[wooze]` table: it has no field to change, and an empty table opts it in.
 
 These are the `wooze` module, which Living Props owns (#698): it is enabled in a scene the living subsystem runs in (living props, a `[living]` or `[wooze]` table, a `shallow_wooze` entity or woozy grass). In any other scene a call is a script error at its line, `set_wooze: the wooze module is not enabled here; it is enabled when the scene has living props, ...`, and the rest of that callback doesn't run.
+
+### Fields a scene declares
+
+"This part of the level is windier, foggier or slower" is a field: a few named numbers that are one value everywhere, with zones laid over them by place (#1014). The wooze field is one the engine knows; a scene declares its own with `[field.<name>]`, and its scripts read a key by place:
+
+```toml
+[field.weather]
+keys = { wind = { min = 0, default = 1 }, fog = { min = 0, max = 1, default = 0 } }
+
+[[field.weather.zone]]
+name = "storm"
+shape = "sphere"          # or "box", with size = [x, y, z]
+center = [20, 0, 0]
+radius = 8
+falloff = 4               # metres past the edge to fade out over; 0 is a hard edge
+wind = 6                  # any of the field's keys; one it leaves out passes through
+```
+
+- **`keys`** names the field's numbers. Each is a table of `min`, `max` and `default`, all optional (unsaid, the default is 0, or the end of the range nearest it), or a bare number, its default: `keys = { scale = 0.5 }`. A value outside a key's range is refused wherever it is written: the default, a zone, a script.
+- **`[[field.<name>.zone]]`** entries are written as [`[[wooze.zone]]`](procgen.md#the-wooze-field) ones are: `name`, `shape`, `center`, `radius` or `size`, `falloff`, and any of the field's keys. They lie over the defaults in the order written, and their mistakes are told in the same words.
+
+<!-- script-api:begin module:field -->
+<!-- Generated by `flint script api --book` from the engine's declarations (crates/flint-script/src/api/, or the ScriptModule of a feature that owns its module): edit the doc there, not here. CI's headless job runs --check-book. -->
+
+| Function | Returns | Description |
+|---|---|---|
+| `field_sample(field: str, key: str, pos: map)` | `num`: the key's value there | One key of a scene's field at a place, now: its zones and scripts' changes included. |
+| `field_sample(field: str, key: str, x: num, y: num, z: num)` | `num`: the key's value there | One key of a scene's field at x, y, z, now. |
+| `field_at(field: str, pos: map)` | `map`: `#{<key>: value, ..., zones: #{name: share}`} | Every key of a scene's field at a place, now, and the zones that reach it. |
+| `field_set(field: str, values: map)` | — | Change a field's global values at once: any of its keys, each held to its range. |
+| `field_set(field: str, values: map, seconds: num)` | — | Change a field's global values over some seconds. |
+| `field_set_zone(field: str, zone: str, fields: map)` | — | Change a field's named zone at once, keeping what fields leaves out, or add it (shape, center, radius or size, falloff, a key). |
+| `field_set_zone(field: str, zone: str, fields: map, seconds: num)` | — | Change or add a field's named zone, its values easing and a new zone fading in over some seconds. |
+| `field_remove_zone(field: str, zone: str)` | `bool`: whether there was one | Drop a field's named zone at once. |
+| `field_remove_zone(field: str, zone: str, seconds: num)` | `bool`: whether there was one | Fade a field's named zone out over some seconds, then drop it. |
+
+<!-- script-api:end -->
+
+```rust
+fn on_update() {
+    let me = self_entity();
+    let wind = field_sample("weather", "wind", get_world_position(me));
+    let p = get_position(me);
+    set_position(me, p.x + wind * 0.2 * delta_time(), p.y, p.z);  // pushed harder in the storm
+}
+```
+
+A place is the `#{x, y, z}` map `get_position` and `get_world_position` return, or three numbers. `field_at(field, pos)` is every key there and the zones that reach it, each with how much of itself it gives, 0 to 1: `#{ fog: 0.0, wind: 3.5, zones: #{ storm: 0.5 } }`.
+
+Unlike the wooze field, a scene's field is the scripts' alone, and it changes as they call: a `field_set` is read back by the very next `field_sample`, in the same frame. The writes take an optional last argument of seconds to ease over, on the game clock; a new zone fades in whole, and `field_remove_zone(field, zone, seconds)` fades one out, returning whether there was one. A wrong field, key or value is a script error that names what there is (`field_sample: 'rain' isn't a weather key; it takes fog, wind`). The names are one `field_` family because [`set_field` and `get_field`](#entity-api) are a component's fields.
+
+The `field` module is enabled in a scene with a `[field]` table, in the player, `flint playtest` and `flint render --scripts` alike. `flint check` and `flint validate` hold each field's keys and zones to these rules as `bad-field`, placed by field and key (`weather.keys.wind`) or zone (`weather.zone.storm`); the player warns at the scene's entry and plays without the part that's wrong: a field whose keys are wrong, or a zone. Schema: `flint schema field`.
 
 ### Living Props API
 
@@ -1476,12 +1594,16 @@ is one every `persist_get` sees last session's values from the first
 created until something is stored.
 
 It is written back 1 s after the last `persist_set` / `persist_remove` /
-`persist_clear` (a script writing every frame still produces one write per
-second), on every scene transition (after the outgoing scene's
+`persist_clear` that changed something (a script writing new values every
+frame still produces one write per second; setting a key to the value it
+already holds is no change and writes nothing), on every scene transition (after the outgoing scene's
 `on_scene_exit`), and on exit. `persist_save()` with no arguments forces the
 write at the end of the frame --- call it after a settings screen commits, so
 a crash a moment later loses nothing. Loads and saves log at `info`; a save
-that fails or a file that can't be read logs at `error`.
+that fails or a file that can't be read logs at `error`. A save is written on
+the frame (a few ms, more on a busy disk), and each one leaves a `save` frame
+note, so a hitch it causes is named `save debounce, 9.1 ms` in the hitch log
+rather than `sync +9.1 ms`.
 
 A game's Rust code shares the same store: a player extension reaches it as
 `ExtensionCtx::persist` (see [Player Extensions](../guides/player-extensions.md#saved-data)),
@@ -1702,6 +1824,8 @@ Load and manipulate TOML-defined UI documents at runtime:
 | `ui_set_enabled(element_id: str, enabled: bool)` | — | Let focus reach an element or not; a disabled one draws its class's disabled state. |
 | `unload_ui(handle: int)` | — | Unload a UI document `load_ui` returned. |
 | `ui_set_text(element_id: str, text: str)` | — | Set an element's text. |
+| `ui_get_text(element_id: str)` | `str`: "" for an element no document has | An element's text: what a text input holds, a script's text, else its layout's. |
+| `ui_editing()` | `bool` | Whether a text input has focus: the player is typing, so a game can leave its own keys alone. |
 | `ui_show(element_id: str)` | — | Show an element. |
 | `ui_hide(element_id: str)` | — | Hide an element. |
 | `ui_is_shown(element_id: str)` | `bool`: false for an element no document has | Whether an element is drawn: it and every element it is inside visible. |
@@ -1751,8 +1875,8 @@ The draw API lets scripts render 2D overlays each frame via the `on_draw_ui()` c
 | `draw_text(x: num, y: num, text: str, size: num, opts: map)` | — | Draw text at a point; opts: color, font, align, stroke \[r, g, b, a, width\], spacing, layer, shadow \[dx, dy, r, g, b, a\], glow \[r, g, b, a, radius\]. |
 | `draw_rect(x: num, y: num, w: num, h: num, r: num, g: num, b: num, a: num)` | — | Fill a rectangle. |
 | `draw_rect(x: num, y: num, w: num, h: num, opts: map)` | — | Fill a rectangle; opts: color, rounding (a radius, or \[tl, tr, br, bl\]), layer. |
-| `draw_rect_outline(x: num, y: num, w: num, h: num, r: num, g: num, b: num, a: num, thickness: num)` | — | Outline a rectangle, thickness in points. |
-| `draw_rect_outline(x: num, y: num, w: num, h: num, opts: map)` | — | Outline a rectangle; opts: color, thickness (points, 1), rounding (a radius), layer. |
+| `draw_rect_outline(x: num, y: num, w: num, h: num, r: num, g: num, b: num, a: num, thickness: num)` | — | Outline a rectangle, the stroke outside its edge, thickness in points. |
+| `draw_rect_outline(x: num, y: num, w: num, h: num, opts: map)` | — | Outline a rectangle, the stroke outside its edge; opts: color, thickness (points, 1), rounding (a radius), layer. |
 | `draw_rect_gradient(x: num, y: num, w: num, h: num, opts: map)` | — | Fill a rectangle from one colour to another; opts: from, to (colours, white), vertical (top to bottom, true; false is left to right), layer. |
 | `draw_circle(x: num, y: num, radius: num, r: num, g: num, b: num, a: num)` | — | Fill a circle. |
 | `draw_circle(x: num, y: num, radius: num, opts: map)` | — | Fill a circle; opts: color, layer. |
@@ -1764,7 +1888,7 @@ The draw API lets scripts render 2D overlays each frame via the `on_draw_ui()` c
 | `draw_line_3d(x1: num, y1: num, z1: num, x2: num, y2: num, z2: num, opts: map)` | — | A line between two world points projected onto the HUD; opts: color, thickness (points, 1), layer. |
 | `draw_world_line(x1: num, y1: num, z1: num, x2: num, y2: num, z2: num, r: num, g: num, b: num, a: num, thickness: num)` | — | A line between two world points drawn in the 3D frame, depth-tested; thickness in points. |
 | `draw_world_line(x1: num, y1: num, z1: num, x2: num, y2: num, z2: num, opts: map)` | — | A line between two world points in the 3D frame, depth-tested; opts: color, thickness (points, 1). |
-| `draw_world_text(x: num, y: num, z: num, text: str, size: num, opts: map)` | — | Text at a world point, depth-tested; opts: `draw_text`'s (no layer) plus valign, facing \[x, y, z\] (a plane's normal; none is a billboard) and up. |
+| `draw_world_text(x: num, y: num, z: num, text: str, size: num, opts: map)` | — | Text at a world point, depth-tested; opts: `draw_text`'s (no layer) plus valign, facing \[x, y, z\] and up. Without facing it's a billboard and size is points. With facing it's painted on the plane through the point, read only from the side facing points to, and size is the em in world units (0.03 is a line on a screen), as are spacing, stroke, glow and shadow. |
 | `draw_ring(cx: num, cy: num, r_inner: num, r_outer: num, start_deg: num, end_deg: num, r: num, g: num, b: num, a: num, layer: int)` | — | Fill an annular sector: degrees clockwise from 12 o'clock, end after start, `r_inner` 0 for a pie. |
 | `draw_ring(cx: num, cy: num, r_inner: num, r_outer: num, start_deg: num, end_deg: num, opts: map)` | — | Fill an annular sector (degrees clockwise from 12 o'clock); opts: color, layer. |
 | `draw_arc(cx: num, cy: num, radius: num, start_deg: num, end_deg: num, r: num, g: num, b: num, a: num, thickness: num, layer: int)` | — | Stroke an arc of a circle: `draw_ring` centred on radius, thickness wide. |
@@ -1790,7 +1914,7 @@ The draw API lets scripts render 2D overlays each frame via the `on_draw_ui()` c
 | `screen_width()` | `num`: points | The window's width in logical points, the draw space. |
 | `screen_height()` | `num`: points | The window's height in logical points, the draw space. |
 | `measure_text(text: str, size: num)` | `map`: `#{width, height}` in points | The size text would draw at, in the default font. |
-| `measure_text(text: str, size: num, opts: map)` | `map`: `#{width, height}` in points | The size text would draw at; opts: font ("" for the default), spacing (extra letter spacing). |
+| `measure_text(text: str, size: num, opts: map)` | `map`: `#{width, height}` in points | The size text would draw at; opts: font ("" for the default, "monospace" for a fixed pitch), spacing (extra letter spacing). |
 | `find_nearest_interactable()` | `map`: `#{entity, prompt_text, interaction_type, distance}`, or () when none is in range | The enabled interactable nearest the player within its own range, as the HUD's prompt shows it. |
 | `world_to_screen(x: num, y: num, z: num)` | `map`: `#{x, y, depth, visible}`; visible is false behind the near plane, where x and y mean nothing | Where a world point lands on the screen, with the camera the last frame rendered with. |
 | `screen_to_ground(x: num, y: num, plane_y: num)` | `any`: \[x, z\], or () where the view doesn't reach the plane (sky, a level orthographic camera, a plane behind) | Where the ray through a screen point meets the plane y = `plane_y`. |
@@ -1842,6 +1966,14 @@ fn sign(x, y, z, fx, fz, name) {
 
 The point is pulled toward the camera by the world lines' 0.2% (`DEPTH_SLACK`), so text painted on a surface doesn't fight it. A plane's text that reaches behind the camera isn't drawn at all, and nor is any text whose point is behind it or past the far plane. Scripts decide when text is too small to read: there's no minimum size.
 
+Adding `facing` to a billboard changes what its `size` means. `size: 15.0` is a 15 point name tag without it and a 15 metre em with it: from a few metres away that's a corner of one glyph, or, when the label reaches behind the camera, nothing at all. The player warns once a label when a plane's size is 4 units or more and longer than the text's distance from the camera (`draw_world_text ... has facing, so its size 15 is the em in world units`). A line of text on a screen is about 0.03, a shop's name 0.15 to 0.3:
+
+```rust
+// A prompt on a terminal's glass, which faces +x: read from the +x side
+draw_world_text(c[0] + 0.01, c[1] + 0.06, c[2] + 0.12, "> _", 0.03,
+    #{ color: [0.4, 1.0, 0.6, 0.95], facing: [1.0, 0.0, 0.0], align: "left" });
+```
+
 `find_nearest_interactable()` returns a map with `entity` (ID), `prompt_text`, `interaction_type`, and `distance` fields when an interactable entity is within range.
 
 `world_to_screen` and `screen_to_ground` are inverses. In `on_draw_ui` they use the camera the frame renders with; in `on_update`, which runs before script camera overrides apply, they use the previous frame's. `world_to_screen` of a ground hit lands back on the screen point it came from. Native functions a game registers get the same answers from `Projector` (see [Player extensions](../guides/player-extensions.md#projecting-from-native-functions)). `screen_to_ground` takes logical points, the `mouse_x()` / `mouse_y()` space, so it is correct at any display scale. It works for perspective and orthographic cameras, including one looking straight down. It returns `()` over the sky, when an orthographic camera looks level, or when the plane is behind the camera. Picking the ground under the cursor:
@@ -1884,7 +2016,7 @@ draw_text(40.0, 40.0, "128", 96.0, #{
 
 | Key | Value | Default | What it draws |
 |-----|-------|---------|---------------|
-| `font` | string | default font | A family from `<project>/fonts/` (below) |
+| `font` | string | default font | A family from `<project>/fonts/` (below), or `"monospace"` / `"proportional"` for egui's own two |
 | `color` | `[r, g, b, a]` | white | The text's face |
 | `align` | `"left"` \| `"center"` \| `"right"` (or 0--2) | `"left"` | Which edge of the text `x` names |
 | `stroke` | `[r, g, b, a, width]` | none | A band `width` points wide round the glyphs, beneath them |
@@ -1909,6 +2041,20 @@ A picture can be no wider or taller than the GPU's largest texture (8192 pixels 
 [[font]]
 name = "display"                      # use as font = "display"
 file = "BarlowCondensed-BlackItalic.ttf"
+
+[[font]]
+name = "terminal"                     # a path, from the manifest's folder
+file = "ofl/VT323/VT323-Regular.ttf"
+```
+
+A `file` with a folder in it is a path from the manifest's own folder: below it (`ofl/VT323/VT323-Regular.ttf`) or beside it (`../vendor/Mono.ttf`), never absolute. That is how a face kept in a subfolder for a [glyph set](glyph-atlas.md) is also a HUD font, without a second copy of the file; it is registered under the alias alone, not its stem.
+
+**Fixed-pitch text with no font of your own.** `font: "monospace"` is egui's monospace family and `font: "proportional"` its proportional one, the default (#1179). Every glyph of the monospace face takes the same width, so a column of numbers or a line of code lines up with one `draw_text` call, and `measure_text` with the same `font` is the width it draws: the cell is `measure_text("0", size, #{ font: "monospace" }).width`. A project file or alias named `monospace` or `proportional` comes first; with `[egui] monospace` set (below) the name draws the game's own face.
+
+```rhai
+let cell = measure_text("0", 18.0, #{ font: "monospace" }).width;
+draw_text(24.0, 24.0, "seed  = 42", 18.0, #{ font: "monospace" });
+draw_rect(24.0 + cell * 10.0, 24.0, cell, 18.0, #{ color: [0.6, 1.0, 0.7, 1.0] }); // the cursor
 ```
 
 Each named family keeps egui's built-in fonts behind it, for glyphs the file lacks. The player logs the loaded families at startup (`RUST_LOG=info`). Text without a `font` — and the data-driven UI's default — uses egui's built-in proportional font, unless the manifest names another ([ADR 0081](https://github.com/chrischaps/Flint/blob/main/docs/adr/0081-project-fonts-name-egui-defaults.md)):
@@ -2064,14 +2210,14 @@ text = "Lap 1/3"
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `type` | string | `"panel"` | Element type: `panel`, `text`, `rect`, `circle`, `image`, and the controls `button`, `list`, `slider` ([Focus and input](#focus-and-input)) |
+| `type` | string | `"panel"` | Element type: `panel`, `text`, `rect`, `circle`, `image`, and the controls `button`, `list`, `slider`, `text_input` ([Focus and input](#focus-and-input)) |
 | `anchor` | string | `"top-left"` | A root's point on the screen; a child's in its parent's content box, which takes it out of the parent's stack (see below) |
 | `parent` | string | --- | Parent element ID (child inherits position from parent) |
 | `class` | string | `""` | Style class name from the companion `.style.toml` |
-| `text` | string | `""` | Default text content (a `text`'s, a `button`'s label) |
+| `text` | string | `""` | Default text content (a `text`'s, a `button`'s label, what a `text_input` starts with) |
 | `src` | string | `""` | Image source path (`image` only) |
 | `visible` | bool | `true` | Initial visibility. A hidden element hides everything inside it |
-| `focusable` | bool | `true` for `button`, `slider` | Whether focus can land on it |
+| `focusable` | bool | `true` for `button`, `slider`, `text_input` | Whether focus can land on it |
 | `enabled` | bool | `true` | A disabled control is skipped by focus and drawn in its class's `disabled` state |
 | `autofocus` | bool | `false` | Takes focus when it is shown and nothing has focus: give a menu's first button this |
 | `nav_up`, `nav_down`, `nav_left`, `nav_right` | string | --- | The element that direction goes to from here, overriding the layout |
@@ -2079,6 +2225,8 @@ text = "Lap 1/3"
 | `min`, `max`, `step` | float | `0`, `1`, a tenth of the range | A `slider`'s range, and how far left and right move it |
 | `items` | array of strings | --- | A `list`'s items: a button of `item_class` is made for each, ids `<list>.0`, `<list>.1`, ... |
 | `item_class`, `wrap` | string, bool | `""`, `true` | The class each made item takes; whether the arrows wrap from the last item to the first (`list` only) |
+| `scroll` | bool | `false` | A `list` whose items scroll inside its box ([Lists that scroll](#lists-that-scroll)) |
+| `placeholder`, `max_length` | string, int | `""`, `0` | What a `text_input` shows while empty; the most characters it takes, 0 for no limit ([Text input](#text-input)) |
 
 `[ui]` holds `style` (the style file, a path from the project root) and an optional `name`.
 
@@ -2090,7 +2238,7 @@ text = "Lap 1/3"
 
 ```text
 ui/pause.ui.toml: 1 error
-  error[bad-ui]: element `resume`: unknown type `buton` (types: panel, text, rect, circle, image, button, list, slider)
+  error[bad-ui]: element `resume`: unknown type `buton` (types: panel, text, rect, circle, image, button, list, slider, text_input)
 ```
 
 #### File Format: `.style.toml`
@@ -2147,6 +2295,8 @@ y = 10
 | `margin_bottom` | float | `0` | Space below element in flow layout |
 | `border_color`, `border_width` | [r,g,b,a], float | `[1,1,1,1]`, `0` | An outline round a panel, button, list or slider; on while `border_width` is above 0 |
 | `knob_color` | [r,g,b,a] | `[1,1,1,1]` | A slider's knob, drawn when `radius` is above 0 (its track is `bg_color`, its fill `color`) |
+| `scrollbar_color`, `scrollbar_width` | [r,g,b,a], float | `[1,1,1,0.35]`, `3` | A scrolling list's thumb, drawn along its far edge while its items overflow; width 0 draws none |
+| `placeholder_color`, `caret_color` | [r,g,b,a] | `[1,1,1,0.4]`, `[1,1,1,1]` | A `text_input`'s placeholder text, and its caret (its text is `color`) |
 
 Colour arrays may be `[r, g, b]` (alpha 1) or `[r, g, b, a]`.
 
@@ -2267,11 +2417,63 @@ What happens reaches the script that loaded the document as **`on_ui(element_id,
 | Event | When |
 |---|---|
 | `focus`, `blur` | Focus arrived at or left the element |
-| `activate` | A button was pressed by `ui_accept`, a click or a tap |
-| `change` | A slider's value moved, or a list's selection did (its `ui_get_value` is the new index) |
+| `activate` | A button was pressed by `ui_accept`, a click or a tap; Enter (or a pad's `ui_accept`) in a text input |
+| `change` | A slider's value moved, a list's selection did (its `ui_get_value` is the new index), or a text input's text did (once a frame) |
 | `back` | `ui_back` while the element had focus |
 
 A list's made items report the list's id, and `ui_get_value(list)` is the item's index; a button written as a list's child reports its own id. `ui_focus`, `ui_set_slider`, `ui_select`, `ui_set_items` and `ui_set_enabled` set the same state from a script (table above).
+
+#### Lists that scroll
+
+A `list` with `scroll = true` keeps its items inside its box: give its class a `height` (not `height_auto`, which grows it to fit them all) and the items past it are clipped away, drawn only as far as they show. It scrolls (#1229):
+
+- **With focus.** Whenever focus moves to an item, by the arrows, a pad, `ui_focus` or `ui_select`, the list moves just enough to show all of it, so stepping down a 20-item list in a 5-row box keeps the focused row in view, and wrapping from the last row back to the first goes back to the top.
+- **With the wheel.** A notch over the list moves it a row (from one item to the next). When the focused item would leave the view, focus moves to the nearest row still wholly in it, so the focused item is always drawn.
+- **With a finger.** A finger dragged along the list more than 8 points scrolls it with the finger and lets go of the item it pressed; its lift is no tap.
+
+What is clipped away can't be hovered, clicked or tapped, and the arrows' nearest-element search from outside the list skips rows out of view. While its items overflow, the list draws a thumb along its far edge, as long as the share of them in view and as far along as it has scrolled (`scrollbar_color`, `scrollbar_width`). A horizontal list (`layout = "horizontal"`) scrolls across. The clip goes on each draw item as `push_clip` does, so the HUD painter honours it; a hot reload keeps where a list had scrolled.
+
+```toml
+[elements.levels]
+type = "list"
+class = "levels"      # width = 260, height = 200: five rows of 40
+item_class = "row"    # height = 36, margin_bottom = 4
+scroll = true
+items = ["Level 1", "Level 2", "Level 3"]  # ... or ui_set_items from a script
+```
+
+#### Text input
+
+A `text_input` is a box that takes what the player types while it has focus: a name, a seed, a search. It is focusable like a button; give it `autofocus`, `ui_focus` it, or click it. While it has focus:
+
+| Key | What it does |
+|---|---|
+| A character (or an input method's finished text) | Goes in at the caret, up to `max_length` characters |
+| Backspace, Delete | Removes the character before or after the caret |
+| Left, Right, Home, End | Move the caret |
+| Enter | `activate`: the player is done. A pad's `ui_accept` (south button) does the same |
+| Up, Down | Leave the field, as from any control |
+
+The keys the field typed with are its own that frame: Space types a space rather than pressing `ui_accept`, Backspace deletes rather than sending `back`, and left and right move the caret rather than focus. Each frame its text changes sends one `change`; `ui_get_text(id)` reads it and `ui_set_text(id, text)` sets it (the caret goes after it). A click puts the caret at the nearest character. A focused field draws its caret (`caret_color`) after the character it is at; an empty one shows its `placeholder` in `placeholder_color`; a long text slides left so the caret stays in the box, clipped to the box's padding. With no `width` a field is 200 points across, and a line of its font plus its padding high.
+
+`ui_editing()` is true while a text input has focus, so a game can leave its own keys alone while the player types (`if !ui_editing() { ... }` around movement read from the same keys). The text comes from the window's keyboard events on the desktop and on the web, the same winit path; an input script's `type <text>` and `tap <key>` lines type too. A phone's on-screen keyboard isn't opened yet.
+
+```toml
+[elements.name]
+type = "text_input"
+class = "field"
+placeholder = "Your name"
+max_length = 16
+autofocus = true
+```
+
+```rhai
+fn on_ui(element, event) {
+    if element == "name" && event == "activate" {
+        persist_set("player_name", ui_get_text("name"));
+    }
+}
+```
 
 #### Example: a pause menu
 
@@ -2379,7 +2581,7 @@ scripts/keeper.rhai:7:1: error[unknown-callback]: `fn on_colision` is not a call
 checked 1 script: 3 errors
 ```
 
-and exits 1. What else it reports: a syntax error at its line, a literal no declaration accepts (`set_position("crate", ...)`, an entity id given as a string), a callback with the wrong parameters (`fn on_update(dt)`; `delta_time()` is the step), an import that finds no module, with the paths tried, a call of a deprecated function (a warning), and, as a warning, a call in `on_update` or `on_draw_ui` that mixes int and float literals in four or more number arguments (`draw_rect(10, 10, 100.0, 50, ...)`), which misses both signatures the engine registers for it and takes Rhai's slow search every frame: write its numbers all as floats or all as ints. The full list of codes is in [Scene diagnostics](schemas.md#scene-diagnostics).
+and exits 1. What else it reports: a syntax error at its line, a literal no declaration accepts (`set_position("crate", ...)`, an entity id given as a string), a callback with the wrong parameters (`fn on_update(dt)`; `delta_time()` is the step), an import that finds no module, with the paths tried, a `global::NAME` read with no top-level `const NAME` (`unknown-global`: a `let` read that way fails every time it runs), a call of a deprecated function (a warning), and, as a warning, a call in `on_update` or `on_draw_ui` that mixes int and float literals in four or more number arguments (`draw_rect(10, 10, 100.0, 50, ...)`), which misses both signatures the engine registers for it and takes Rhai's slow search every frame: write its numbers all as floats or all as ints. The full list of codes is in [Scene diagnostics](schemas.md#scene-diagnostics).
 
 `flint check` and `flint validate` run the same check, so a script error fails them too.
 

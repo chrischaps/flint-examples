@@ -510,6 +510,16 @@ impl fmt::Display for WoozeIssue {
 }
 
 impl WoozeDef {
+    /// The global knobs it sets itself, as a preset's `[wooze]` holds them.
+    pub fn knobs(&self) -> super::WoozeKnobs {
+        super::WoozeKnobs {
+            amplitude: self.amplitude,
+            step: self.step,
+            glide: self.glide,
+            jitter: self.jitter,
+        }
+    }
+
     /// The field this table describes, made of whatever is good in it, and an
     /// issue for each thing that isn't.
     pub fn field(&self) -> (WoozeField, Vec<WoozeIssue>) {
@@ -637,6 +647,7 @@ fn zone_schema(wooze: &flint_schema::TableSchema) -> Option<flint_schema::TableS
         description: None,
         fields: fields.clone(),
         panel: None,
+        retired: Default::default(),
     })
 }
 
@@ -987,7 +998,9 @@ mod tests {
     }
 
     fn schemas() -> SchemaRegistry {
-        SchemaRegistry::load_from_directory("../../schemas").unwrap()
+        // The engine's set as a game gets it, the living package's with it (#1332)
+        let dirs = flint_core::project::host_schema_dirs(&["../../schemas"], None).dirs;
+        SchemaRegistry::load_from_directories(&dirs).unwrap()
     }
 
     const GROVE: &str = r#"
@@ -1153,7 +1166,7 @@ zone = { type = "array", element = { type = "table", fields = { glide = { type =
         let schemas = schemas();
         let wooze = schemas
             .get_table("wooze")
-            .expect("schemas/scene/wooze.toml");
+            .expect("packages/living/schemas/scene/wooze.toml");
         let zone = &super::zone_schema(wooze).expect("the zone's schema");
         let ranges = [
             ("amplitude", Some(0.0), Some(f64::from(AMPLITUDE_MAX))),

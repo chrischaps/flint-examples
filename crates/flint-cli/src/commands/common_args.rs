@@ -204,6 +204,33 @@ pub fn load_schemas(
     }
 }
 
+/// The scene at `path`, for a command: [`flint_scene::load_scene`] whose
+/// failure names the file ([`flint_scene::load_failed`], #1044), so an
+/// agent running a command over a folder of scenes knows which one to
+/// open. Every command loads its scene through this, or through
+/// [`load_settled`].
+pub fn load_scene(
+    path: &str,
+    registry: &flint_schema::SchemaRegistry,
+) -> anyhow::Result<(flint_ecs::FlintWorld, flint_scene::SceneFile)> {
+    use anyhow::Context;
+    flint_scene::load_scene(path, registry).with_context(|| flint_scene::load_failed(path))
+}
+
+/// [`load_scene`], then living props' tables checked and the preset
+/// `[wooze] preset` names filled in (`flint_procgen::settle_scene`), as the
+/// player loads one: a scene loaded for drawing.
+pub fn load_settled(
+    path: &str,
+    registry: &flint_schema::SchemaRegistry,
+) -> anyhow::Result<(flint_ecs::FlintWorld, flint_scene::SceneFile)> {
+    use anyhow::Context;
+    let (world, mut scene_file) = load_scene(path, registry)?;
+    flint_procgen::settle_scene(&mut scene_file, std::path::Path::new(path))
+        .with_context(|| flint_scene::load_failed(path))?;
+    Ok((world, scene_file))
+}
+
 /// TEMPORARY, for one release (ADR 0114 decision 3, #765): say on stderr
 /// which `schemas/` beside the scene this command used to add to its
 /// `--schemas` flags and no longer does. For the commands that did add
@@ -214,10 +241,33 @@ pub fn warn_dropped_schemas(dirs: &flint_schema::SchemaDirs) {
     }
 }
 
+/// The value of a `--max-cost` flag: dollars, `$` allowed, not negative.
+/// Here, not in `ai_costs`, so the flag parses alike in a build without the
+/// ai package (#1333), whose command then names the package.
+pub fn parse_usd(s: &str) -> std::result::Result<f64, String> {
+    let v: f64 = s
+        .trim()
+        .trim_start_matches('$')
+        .parse()
+        .map_err(|_| format!("'{s}' isn't an amount in USD (e.g. 0.50)"))?;
+    if !v.is_finite() || v < 0.0 {
+        return Err(format!("--max-cost must be a non-negative amount, not {s}"));
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flint_render::DebugMode;
+
+    #[test]
+    fn usd_amounts_parse() {
+        assert_eq!(parse_usd("1.00"), Ok(1.0));
+        assert_eq!(parse_usd("$0.50"), Ok(0.5));
+        assert!(parse_usd("-1").is_err());
+        assert!(parse_usd("lots").is_err());
+    }
 
     /// #308: `wireframe-overlay` was matched in render.rs and refused here.
     /// Now there is one table; this holds it to the renderer's modes: every

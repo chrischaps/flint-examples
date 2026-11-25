@@ -52,12 +52,34 @@ the URL of a site already up. A scene may carry its own query after `+`:
 | `--passes a,b` | every pass seen | the GPU passes the table has a column for |
 | `--query '&k=v'` | | more of the page's query on every page (`&fps=native`, `&scale=1`, `&perf=cpu`...) |
 | `--begin auto\|click` | `auto` | `auto` adds `?begin=auto`, which lifts the Begin gate with no click; `click` clicks Begin over CDP with a user gesture instead, which also opens the sound |
+| `--rounds N` | `1` | plays every scene once a round, N rounds, in the same browser: `ascii_none,ascii_full --rounds 4` is none, full, none, full... Heat or another job on the GPU then shows as a trend across rounds, not as a step between scenes, so read each scene against its own round's control. Labels gain `-r<n>` and the table a row per round. `../phone-perf/submits.mjs` alternates the same way on the phone (#568, #1318) |
 | `--port N` | `9381` | Chrome's devtools port; pick another to run two at once |
 | `--chrome <path>` | the usual install, or `CHROME` | |
 | `--browser chrome\|firefox` | `chrome` | `firefox` drives headed Firefox over WebDriver BiDi on `--port` (it has no CDP), on a fresh profile whose `layout.css.devPixelsPerPx` is the DPR, as Chrome's `--force-device-scale-factor` is (#430) |
 | `--firefox <path>` | the usual install, or `FIREFOX` | |
 | `--prefs k=v,k=v` | | more Firefox prefs for the run's profile, or its own overridden (`true`, `false` and integers are typed). `layout.frame_rate=60` is the one to compare builds with (below) |
 | `--trace` | off | from the moment the gate lifts, keeps the time of every frame the browser gives the page (a `requestAnimationFrame` loop beside the player's, `trace.mjs`), and writes it to each page's JSON as `trace`: the frames each second (`fps`), how many seconds ran at 45 fps or less (`slowSeconds`), and the spells of slow frames, each with when it began and how long it lasted. The table gains a column. It's how to tell a frame's own work running long from the browser missing vsync (#962) |
+
+| `--save-trace` | off | after the last read, presses the readout's **Save trace** (a build with the scope recorder: `trunk build --release --cargo-profile web-release --features trace`) and keeps the file the page offers as `<label>.trace.json`. The browser downloads into a folder of the run's own. Each page's JSON gets `savedTrace`: the file, its header and `scopes.mjs`'s summary (scopes, how many read 0, by name, and the shortest durations above 0, which on a coarse clock are whole steps), and the table a column. A page whose file never comes is an error, and the run exits 1 (#1266) |
+| `--isolate` | off | serves the folder cross-origin isolated (`Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`), which a browser needs before it gives `performance.now()` its finer step: Chrome 100 µs to 5 µs, Firefox 1 ms to 20 µs. GitHub Pages can't send them. The table's header says whether the pages were isolated |
+
+A scene item with `+scope_bench=1` times a scope in that browser before the
+game plays (`flint_core::profile::cost`, the same bench as ADR 0128's desktop
+table): the log prints the line, the page's JSON keeps `scopeCost` and the
+table gains a column. That page plays without the recorder, so `--save-trace`
+passes it over. #1266's runs:
+
+```bash
+node tools/web-perf/run.mjs <trunk dist with a pack> hitch_metronome.flintpack \
+  hitch_metronome,hitch_metronome+scope_bench=1 --seconds 12 --reads 1 --save-trace [--isolate] --out <dir>
+node tools/web-perf/run.mjs ... --browser firefox --prefs layout.frame_rate=60 --seconds 22 ...
+```
+
+The browser left from a run used to stay: on Windows `firefox.exe` is a
+launcher, and killing it left the browser running and holding the port, so the
+next run drove the old one (its downloads went to the old folder). The run now
+closes Firefox over BiDi (`browser.close`), and refuses to start when anything
+already answers on `--port`.
 
 Each page's JSON keeps the readout's text and its copyable line at every read
 (`reads[].text`, `reads[].line`), the line parsed into numbers
@@ -75,7 +97,49 @@ no frames to a window that is off screen or covered, so the window opens at
 0,0 with the throttling flags off (and `CalculateNativeWinOcclusion` disabled):
 leave it be while it runs. Other jobs on the GPU move the numbers; run twice
 and look at a pass the change doesn't touch (SSAO, Bloom) to spot a contended
-run. Tests for the line parser and the trace: `node --test tools/web-perf/perfline.test.mjs tools/web-perf/trace.test.mjs`.
+run. Tests for the line parser, the trace and the saved trace's summary: `node --test tools/web-perf/perfline.test.mjs tools/web-perf/trace.test.mjs tools/web-perf/scopes.test.mjs`.
+
+## GPU-bound pages: the mean frame (#1318)
+
+One frame's time snaps to whole refreshes, so a pass costing 2 ms reads as
+nothing or as half the frame rate, depending on where the frame sat. The mean
+doesn't: the readout's `mean` row (the line's `mean N ms a frame` part, the
+table's `mean ms a frame` column) is the window's span over its frames. When
+the frames are unpaced and the GPU is what holds them, that is the GPU's time
+a frame, and the row says `GPU-bound`, with what it judged from:
+
+```text
+mean 38.40 ms a frame, GPU-bound (guess: unpaced, player 2.48 ms, refresh 16.67 ms)
+```
+
+That is Float with `style=kuwahara` on a 3840x2160 canvas, `fps=native`, in
+Chrome 157 on the RTX 4070 laptop (2026-11-20, `--rounds 3`): its frames read
+p50 33.4 and p90 50.0, snapped to two and three refreshes, while the mean was
+38.40 to 38.78 ms, timestamps said 38.2 to 39.1, and the page counted 258 to
+261 submissions between reads 10 s apart. The same page at `fps=60` read the
+same mean with no flag (paced), and Float alone held 16.67 with none (the
+display's frame). The book's Profiling guide has the native runs.
+
+It is a guess from the CPU side, so it prints its inputs. It says GPU-bound
+only when all three hold:
+
+- **unpaced**: no `?fps=` pacer (`fps=native`; the phone's default `auto`
+  paces, and so does a fixed rate). A paced frame waits for the pacer.
+- **the player's work** (every CPU phase but the swapchain's waits, `acquire`
+  and `present`) is under half the frame. Otherwise the frame is the CPU's.
+- **under vsync, the frames miss the refresh**: the mean is at least 1.15
+  times the refresh period. A page that holds 60 Hz is the display's, however
+  light its GPU. The refresh is the pacer's, or, unpaced, read from the same
+  rAF intervals (the slowest of 60, 75, 90 ... 240 Hz whose multiples explain
+  nine in ten of them). Without vsync (the desktop's `FLINT_VSYNC=0`) nothing
+  holds the frames but the GPU, and the line says `no vsync`.
+
+What it can't see is time the browser's own main thread or the compositor
+takes: a frame held there reads as GPU-bound too. Where timestamps work,
+the GPU frame time beside it is a check. On the phone, where Mali's read 0
+(#568), it is the only GPU number there is: `?perf=1&fps=native&scale=1`
+makes the page GPU-bound, and `--rounds` (or `submits.mjs`) alternates the
+pages so each is read against its own round's control.
 
 ## Firefox runs at half rate before it runs at 60 (#962)
 

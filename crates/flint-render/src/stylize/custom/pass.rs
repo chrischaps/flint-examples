@@ -2,6 +2,7 @@
 //! `custom.rs`, #742).
 
 use super::*;
+use crate::gpu_counts::{CountedDevice, CountedQueue};
 
 // ---------------------------------------------------------------------------
 // The pass
@@ -118,7 +119,12 @@ pub(super) struct LastFrame {
     pub(super) frame: u64,
     pub(super) epoch: u64,
     /// Every target texture it used; held, so an address can't be reused.
+    /// A pair a target, the same texture twice for one with no history.
     pub(super) textures: Vec<Arc<super::super::StyleTexture>>,
+    /// Whether it read its history targets' last frame (#1136).
+    pub(super) trusted: bool,
+    /// What a frame capture keys the history on (#1136).
+    pub(super) key: serde_json::Value,
 }
 
 pub(super) struct CustomPass {
@@ -139,6 +145,8 @@ pub(super) struct CustomPass {
     pub(super) empty: Option<wgpu::BindGroup>,
     /// The history targets' parity and what the last frame drew (#412).
     pub(super) history: Mutex<History>,
+    /// History taken from a frame capture (#1136), until the next frame.
+    pub(super) imported: super::super::history::PendingHistory,
 }
 
 pub(super) fn create(d: &StyleDevice) -> Box<dyn StylePass> {
@@ -183,7 +191,7 @@ pub(super) fn build(d: &StyleDevice) -> CustomPass {
         .as_ref()
         .filter(|_| !source.inputs.any())
         .map(|bgl| {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
+            device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("User Style Empty BG"),
                 layout: bgl,
                 entries: &[],
@@ -292,6 +300,7 @@ pub(super) fn build(d: &StyleDevice) -> CustomPass {
         images: images.map(Mutex::new),
         empty,
         history: Mutex::new(History::default()),
+        imported: Default::default(),
         loaded,
     };
     for i in 0..pass.passes.len() {
@@ -349,12 +358,13 @@ pub(super) fn pipeline(
     // User WGSL, so it keeps every runtime check wgpu has (loop bounding
     // included, after #945) and never goes through `TrustedShader` (#944).
     // The passthrough is composed from the user's source too.
+    crate::gpu_counts::count_shader_module();
     #[allow(clippy::disallowed_methods)]
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("User Style Shader"),
         source: wgpu::ShaderSource::Wgsl(text.into()),
     });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+    let pipeline = device.create_render_pipeline_counted(&wgpu::RenderPipelineDescriptor {
         label: Some("User Style Pipeline"),
         layout: Some(layout),
         vertex: wgpu::VertexState {
@@ -596,7 +606,7 @@ impl ImageSet {
                     ),
                 })
                 .collect();
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
+            device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("User Style Images BG"),
                 layout,
                 entries: &entries,
@@ -655,8 +665,7 @@ pub(super) fn upload_texture(
     } else {
         (image.into_raw(), 1)
     };
-    let texture = wgpu::util::DeviceExt::create_texture_with_data(
-        device,
+    let texture = device.create_texture_with_data_counted(
         queue,
         &wgpu::TextureDescriptor {
             label: Some(&format!("User Style Image {name}")),
@@ -939,18 +948,20 @@ impl CustomPass {
         let table = self.table.lock().unwrap_or_else(|e| e.into_inner());
         let [rows, slots] = table.entries(1);
         frame.bind(name, table.generation(), || {
-            frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(name),
-                layout: &self.frame_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.passes[i].frame_buffer.as_entire_binding(),
-                    },
-                    rows,
-                    slots,
-                ],
-            })
+            frame
+                .device
+                .create_bind_group_counted(&wgpu::BindGroupDescriptor {
+                    label: Some(name),
+                    layout: &self.frame_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.passes[i].frame_buffer.as_entire_binding(),
+                        },
+                        rows,
+                        slots,
+                    ],
+                })
         })
     }
 
@@ -964,7 +975,7 @@ impl CustomPass {
     ) {
         let last = self.passes.len() - 1;
         let uniforms = self.uniforms(frame, last, [frame.width, frame.height], false);
-        frame.queue.write_buffer(
+        frame.queue.write_buffer_counted(
             &self.passes[last].frame_buffer,
             0,
             bytemuck::cast_slice(&[uniforms]),
@@ -981,6 +992,10 @@ impl CustomPass {
 }
 
 impl StylePass for CustomPass {
+    fn keeps_history(&self) -> bool {
+        self.loaded.source.has_history()
+    }
+
     fn encode(
         &self,
         frame: &StyleFrame<'_>,
@@ -1101,11 +1116,13 @@ impl StylePass for CustomPass {
                             resource: wgpu::BindingResource::TextureView(&edges.view),
                         });
                     }
-                    frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some(names.extra),
-                        layout: bgl,
-                        entries: &entries,
-                    })
+                    frame
+                        .device
+                        .create_bind_group_counted(&wgpu::BindGroupDescriptor {
+                            label: Some(names.extra),
+                            layout: bgl,
+                            entries: &entries,
+                        })
                 }))
             }
             Some(_) => {
@@ -1141,7 +1158,7 @@ impl StylePass for CustomPass {
         let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
         let used: Vec<Arc<super::super::StyleTexture>> =
             textures.iter().flatten().cloned().collect();
-        let trusted = history.last.as_ref().is_some_and(|last| {
+        let mut trusted = history.last.as_ref().is_some_and(|last| {
             last.frame.wrapping_add(1) == frame.frame
                 && last.epoch == frame.history_epoch
                 && last.textures.len() == used.len()
@@ -1153,6 +1170,50 @@ impl StylePass for CustomPass {
         });
         let write = history.parity;
         let previous = 1 - write;
+        // What a frame capture keys the history on (#1136): each history
+        // target's name, format and size
+        let key = serde_json::json!({
+            "targets": source
+                .targets
+                .iter()
+                .zip(&sizes)
+                .filter(|(t, _)| t.history)
+                .map(|(t, s)| serde_json::json!({
+                    "name": t.name,
+                    "format": format!("{:?}", t.format.wgpu()),
+                    "size": s,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        // History a frame capture handed back (#1136): last frame's side of
+        // each history target, when the key is the captured frame's
+        if let Some(h) = self.imported.take() {
+            let style = descriptor_name(&self.loaded);
+            if let Some(part) = h.used_part("targets") {
+                match super::super::history::key_difference(&part.key, &key) {
+                    Some(why) => h.say(format!(
+                        "{style}: the captured history was another frame's ({why}): drawn fresh"
+                    )),
+                    None => {
+                        let wrote = source
+                            .targets
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| t.history)
+                            .try_for_each(|(k, t)| {
+                                h.write(frame.queue, part, &t.name, &textures[k][previous].texture)
+                            });
+                        match wrote {
+                            Ok(()) => {
+                                trusted = true;
+                                h.say(format!("{style}: history taken from the capture"));
+                            }
+                            Err(why) => h.say(format!("{style}: history not taken: {why}")),
+                        }
+                    }
+                }
+            }
+        }
         if !trusted {
             for (k, t) in source.targets.iter().enumerate() {
                 if t.history {
@@ -1170,7 +1231,7 @@ impl StylePass for CustomPass {
                 .target
                 .map_or([frame.width, frame.height], |t| sizes[t]);
             let uniforms = self.uniforms(frame, i, size, trusted);
-            frame.queue.write_buffer(
+            frame.queue.write_buffer_counted(
                 &self.passes[i].frame_buffer,
                 0,
                 bytemuck::cast_slice(&[uniforms]),
@@ -1221,11 +1282,13 @@ impl StylePass for CustomPass {
                             ),
                         }
                     }));
-                    frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some(names.passes[i].targets),
-                        layout: bgl,
-                        entries: &entries,
-                    })
+                    frame
+                        .device
+                        .create_bind_group_counted(&wgpu::BindGroupDescriptor {
+                            label: Some(names.passes[i].targets),
+                            layout: bgl,
+                            entries: &entries,
+                        })
                 })
             });
             let images_bg: Option<&wgpu::BindGroup> = match (&targets_bg, images.as_mut()) {
@@ -1273,6 +1336,47 @@ impl StylePass for CustomPass {
             frame: frame.frame,
             epoch: frame.history_epoch,
             textures: used,
+            trusted,
+            key,
         });
     }
+
+    /// Each history target's last-frame side as the captured frame read it
+    /// (#1136): the frame read it and wrote the other, so after the frame
+    /// it still holds the past.
+    fn export_history(&self, out: &mut super::super::history::HistoryExport<'_>) {
+        let source = &self.loaded.source;
+        if !source.has_history() {
+            return;
+        }
+        let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(last) = history.last.as_ref().filter(|l| l.frame == out.frame) else {
+            return;
+        };
+        // The frame flipped the parity to the side it read
+        let read = history.parity;
+        let textures: Vec<(&str, &wgpu::Texture)> = source
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.history)
+            .filter_map(|(k, t)| Some((t.name.as_str(), &last.textures.get(2 * k + read)?.texture)))
+            .collect();
+        out.part(
+            "targets",
+            last.key.clone(),
+            last.trusted,
+            Default::default(),
+            &textures,
+        );
+    }
+
+    fn import_history(&self, history: super::super::history::ImportedHistory) {
+        self.imported.put(history);
+    }
+}
+
+/// The style's name, for what it says of an imported history.
+fn descriptor_name(loaded: &Loaded) -> &str {
+    &loaded.source.name
 }

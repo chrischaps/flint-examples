@@ -3,7 +3,7 @@
 //! host plays after the script batch; each `play_sound*` returns a handle
 //! the script names it by later (#699).
 
-use super::builder::kind::{Any, Entity, Int, Num, Str};
+use super::builder::kind::{Any, Bool, Entity, Int, Num, Str};
 use super::builder::{Call, CallResult, ScriptApi};
 use crate::context::{ScriptCallContext, ScriptCommand, SoundPlay, SoundRef};
 use rhai::Dynamic;
@@ -24,7 +24,7 @@ const PLACE_KEYS: &[&str] = &[
     "rolloff",
 ];
 
-const HANDLE_NOTE: &str = "its handle, for stop_sound and set_sound_volume";
+const HANDLE_NOTE: &str = "its handle, for stop_sound, set_sound_volume and is_sound_playing";
 
 pub(crate) fn register(api: &mut ScriptApi) {
     let mut m = api.module("audio");
@@ -139,6 +139,19 @@ pub(crate) fn register(api: &mut ScriptApi) {
     .run(|call, (h, volume, fade)| set_volume(call, h, volume, fade));
 
     m.func(
+        "is_sound_playing",
+        "Whether a sound a script started is still playing, by its handle, as the frame began: true from the frame after play_sound until it ends or is stopped. Headless (flint render --scripts, a capture) there is no sound, so always false.",
+    )
+    .arg("handle", Int)
+    .returns(
+        Bool,
+        "false for a sound that ended, was stopped or never started (an unknown name, no sound device, a one-shot placed out of earshot, the web before Begin) and for an unknown handle",
+    )
+    .run(|call, (h,)| {
+        u64::try_from(h).is_ok_and(|h| call.ctx_ref().sounds_playing.contains(&h))
+    });
+
+    m.func(
         "audio_position",
         "Seconds into the sound the entity's audio_source plays, wrapped for a loop, on the mixer's clock.",
     )
@@ -173,6 +186,53 @@ pub(crate) fn register(api: &mut ScriptApi) {
         call.ctx().commands.push(ScriptCommand::SetBusVolume {
             bus: bus.to_string(),
             volume: volume.max(0.0),
+        });
+    });
+
+    m.func(
+        "user_bus_volume",
+        "The player's own volume for a bus (a settings menu's), by name, apart from the game's set_bus_volume; saved between runs.",
+    )
+    .arg("bus", Str)
+    .returns(Num, "0..1; 1 for a bus the player never set")
+    .run(|call, (bus,)| {
+        call.ctx_ref()
+            .user_bus_volumes
+            .get(bus.as_str())
+            .copied()
+            .unwrap_or(1.0)
+    });
+
+    m.func(
+        "set_user_bus_volume",
+        "The player's own volume for a bus (0..1), for a settings menu: heard times the game's set_bus_volume, so a fade never overwrites it, and saved for the next run.",
+    )
+    .arg("bus", Str)
+    .arg("volume", Num)
+    .run(|call, (bus, volume)| {
+        let volume = if volume.is_finite() {
+            volume.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let ctx = call.ctx();
+        ctx.user_bus_volumes.insert(bus.to_string(), volume);
+        ctx.commands.push(ScriptCommand::SetUserBusVolume {
+            bus: bus.to_string(),
+            volume,
+        });
+    });
+
+    m.func(
+        "set_bus_lowpass",
+        "A mixer bus's own low-pass cutoff in Hz (20000 for none, as low as 10), by name: it muffles the bus and the buses under it and nothing else, and holds until changed.",
+    )
+    .arg("bus", Str)
+    .arg("cutoff_hz", Num)
+    .run(|call, (bus, cutoff_hz)| {
+        call.ctx().commands.push(ScriptCommand::SetBusLowpass {
+            bus: bus.to_string(),
+            hz: cutoff_hz,
         });
     });
 
@@ -395,6 +455,30 @@ mod tests {
         }
         assert_eq!(ask(&engine, &mut world, "audio_position(ID)"), 1.25);
         assert_eq!(ask(&engine, &mut world, "audio_output_latency()"), 0.042);
+    }
+
+    /// #1000: `is_sound_playing` reads the host's set of playing handles,
+    /// which nothing fills headless; an unknown or negative handle is false.
+    #[test]
+    fn is_sound_playing_reads_the_hosts_set() {
+        let mut system = crate::ScriptSystem::new();
+        let ask = |system: &crate::ScriptSystem, s: &str| -> bool {
+            system.engine.rhai_engine().eval(s).unwrap()
+        };
+        let h: i64 = system
+            .engine
+            .rhai_engine()
+            .eval(r#"play_sound("hum")"#)
+            .unwrap();
+        let asks = format!("is_sound_playing({h})");
+        assert!(!ask(&system, &asks), "no host has said so: headless");
+        system.set_sounds_playing([h as u64, 7]);
+        assert!(ask(&system, &asks));
+        assert!(ask(&system, "is_sound_playing(7)"));
+        assert!(!ask(&system, "is_sound_playing(8)"), "unknown");
+        assert!(!ask(&system, "is_sound_playing(-1)"), "never a handle");
+        system.set_sounds_playing([7]);
+        assert!(!ask(&system, &asks), "each frame's set replaces the last");
     }
 
     #[test]

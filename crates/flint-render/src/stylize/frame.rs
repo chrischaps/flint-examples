@@ -2,6 +2,7 @@
 //! its helpers (moved from `stylize/mod.rs`, #742).
 
 use super::*;
+use crate::gpu_counts::CountedDevice;
 
 /// A style's GPU side: pipelines, layouts and uniform buffers, made once.
 pub trait StylePass: Send + Sync {
@@ -22,11 +23,26 @@ pub trait StylePass: Send + Sync {
     /// (#317). Only a style that draws glyphs does anything with it.
     fn set_text_capture(&self, _on: bool) {}
 
+    /// The glyph atlases this pass holds on the GPU, bytes (#1091), for
+    /// F2's memory line. Only a style that draws glyphs has any.
+    fn glyph_atlas_bytes(&self) -> u64 {
+        0
+    }
+
     /// The glyph grid the last frame encoded with capture on drew, once
     /// that frame's submission is done (this waits on the device). `None`
     /// from a style that draws no glyphs, or before such a frame.
     fn read_text(&self, _device: &wgpu::Device) -> Option<GlyphText> {
         None
+    }
+
+    /// Whether the style keeps state from frame to frame that a second
+    /// draw in one frame would advance (ASCII's cell history, #277; a user
+    /// style's `history` target): such a style refuses a pass knob's
+    /// repeat (#1317) and draws once. False, the default, for a style whose
+    /// every draw is the same work.
+    fn keeps_history(&self) -> bool {
+        false
     }
 
     /// The shared edges' pixels (at [`StyleFrame::depth_size`]) this
@@ -48,6 +64,29 @@ pub trait StylePass: Send + Sync {
     /// heard. `None` (the default) keeps the cut to the mask's pixel.
     fn ownership_cells(&self, _frame: &StyleFrame<'_>) -> Option<OwnershipCells> {
         None
+    }
+
+    /// Hand out the history this style keeps from frame to frame, after a
+    /// captured frame (#1136, [`history`]): a part each, with its key and
+    /// the textures it read as last frame's, staged in `out`'s encoder. A
+    /// style that keeps none (the default) adds nothing.
+    fn export_history(&self, _out: &mut history::HistoryExport<'_>) {}
+
+    /// Where this style notes the textures it draws into that it holds
+    /// itself, outside [`StyleTargets`] (#1161), for a frame capture to read
+    /// after its part: [`HeldTargets::note`] each one after the pass that
+    /// writes it. `None`, the default, for a style whose every target is
+    /// [`StyleFrame::target`]'s (those are read without it).
+    fn held_targets(&self) -> Option<&HeldTargets> {
+        None
+    }
+
+    /// Keep `history`, taken from a capture (#1136), until the next frame
+    /// this style draws, and draw that frame from it where its key is the
+    /// frame's. The default keeps no history and says so.
+    fn import_history(&self, history: history::ImportedHistory) {
+        let line = format!("{}: keeps no history to take back", history.state.style);
+        history.say(line);
     }
 }
 
@@ -139,6 +178,12 @@ pub struct StyleFrame<'a> {
     /// from the world bounds of the draws the mask draws. Read it through
     /// [`styled_rect`](Self::styled_rect).
     pub style_bounds: &'a crate::style_mask::StyleBounds,
+    /// Whether passes are cut to [`styled_rect`](Self::styled_rect) and the
+    /// other rects (#385): the renderer's
+    /// [`set_style_scissor`](crate::SceneRenderer::set_style_scissor).
+    /// Off, they are `None` and the passes draw whole, while
+    /// [`styled_area`](Self::styled_area) still says where the entities are.
+    pub scissor: bool,
     /// The shared geometry edges (#301, [`edges`] says what the channels
     /// hold): [`EDGE_FORMAT`], the depth's size, read by UV with
     /// `textureLoad`. `Some` whenever a style that
@@ -300,13 +345,18 @@ impl StyleFrame<'_> {
         variant: u64,
         make: impl FnOnce() -> wgpu::BindGroup,
     ) -> Arc<wgpu::BindGroup> {
-        self.binds.get(name, self.keyed(variant), make)
+        self.bind_over(name, variant, &[], make)
     }
 
     /// [`bind`](Self::bind) over `over`, what the group binds that may be
     /// made again while the chain lives (the shared edges, the albedo, an
     /// image): kept while those are the same objects, made again in the old
     /// group's place when one isn't (#960).
+    ///
+    /// Filed under the style's install (its generation, #742): a user
+    /// style reloaded under its old names never binds the old install's
+    /// groups, and those go once the renderer's registry no longer holds
+    /// that install (#1271).
     pub fn bind_over(
         &self,
         name: &'static str,
@@ -314,23 +364,8 @@ impl StyleFrame<'_> {
         over: &[crate::bind_cache::Bound<'_>],
         make: impl FnOnce() -> wgpu::BindGroup,
     ) -> Arc<wgpu::BindGroup> {
-        self.binds.get_bound(name, self.keyed(variant), over, make)
-    }
-
-    /// `variant` told apart by the style's install (#742): a user style
-    /// reloaded under its old names never binds the old install's groups.
-    /// A built-in's (generation 0) is `variant` itself.
-    pub(super) fn keyed(&self, variant: u64) -> u64 {
-        match self.descriptor.generation {
-            0 => variant,
-            g => {
-                // splitmix64 of the pair: no install's keys meet another's
-                let mut z = variant ^ g.wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-                z ^ (z >> 31)
-            }
-        }
+        self.binds
+            .get_for(self.descriptor.generation, name, variant, over, make)
     }
 
     /// A bind group over [`depth`](Self::depth): kept while the chain owns
@@ -354,8 +389,14 @@ impl StyleFrame<'_> {
         over: &[crate::bind_cache::Bound<'_>],
         make: impl FnOnce() -> wgpu::BindGroup,
     ) -> Arc<wgpu::BindGroup> {
-        self.binds
-            .get_over(self.depth_key, name, self.keyed(variant), over, make)
+        self.binds.get_over_for(
+            self.descriptor.generation,
+            self.depth_key,
+            name,
+            variant,
+            over,
+            make,
+        )
     }
 
     /// The shared edges' view, or `none` while there are none, as a
@@ -410,14 +451,15 @@ impl StyleFrame<'_> {
     ) -> Option<Arc<wgpu::BindGroup>> {
         let mask = self.mask?;
         Some(self.bind(name, 0, || {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(name),
-                layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(mask),
-                }],
-            })
+            self.device
+                .create_bind_group_counted(&wgpu::BindGroupDescriptor {
+                    label: Some(name),
+                    layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(mask),
+                    }],
+                })
         }))
     }
 
@@ -431,14 +473,15 @@ impl StyleFrame<'_> {
         let edges = self.edges.as_ref()?;
         let over = [crate::bind_cache::Bound::View(&edges.view)];
         Some(self.bind_over(name, 0, &over, || {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(name),
-                layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&edges.view),
-                }],
-            })
+            self.device
+                .create_bind_group_counted(&wgpu::BindGroupDescriptor {
+                    label: Some(name),
+                    layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&edges.view),
+                    }],
+                })
         }))
     }
 
@@ -547,10 +590,30 @@ impl StyleFrame<'_> {
     /// Outside it a per-entity style's passthrough holds, so a pass that
     /// writes the input there ([`kit::scissored_pass`]) is the full pass.
     pub fn styled_rect(&self, pad: u32) -> Option<kit::PixelRect> {
+        if !self.scissors() {
+            return None;
+        }
+        self.styled_area(pad)
+    }
+
+    /// [`styled_rect`](Self::styled_rect) whether or not the scissor is on
+    /// (#930): where the style's entities are, for state a style keeps only
+    /// around them, so that the frame is the same with the scissor off.
+    /// ASCII's edge cells are its one user: what lies outside the area is
+    /// empty either way, and a cell's edge history was what an earlier
+    /// frame left there only while the scissor was on. `None` as for
+    /// `styled_rect` when the entities could be anywhere.
+    pub fn styled_area(&self, pad: u32) -> Option<kit::PixelRect> {
         if self.covers_frame() {
             return None;
         }
-        self.variants_rect(pad, |_, v| !v.off)
+        self.variants_area(pad, |_, v| !v.off)
+    }
+
+    /// Whether the scissor is on, for this renderer and the process
+    /// (`FLINT_STYLE_SCISSOR`).
+    fn scissors(&self) -> bool {
+        self.scissor && scissor_enabled()
     }
 
     /// The pixels of this frame where the style mask can hold one of the
@@ -577,20 +640,37 @@ impl StyleFrame<'_> {
         pad: u32,
         with: impl Fn(u16, &crate::style_mask::StyleVariant) -> bool,
     ) -> Option<kit::PixelRect> {
+        if !self.scissors() {
+            return None;
+        }
+        self.variants_area(pad, with)
+    }
+
+    /// [`variants_rect`](Self::variants_rect) with the scissor on or off.
+    fn variants_area(
+        &self,
+        pad: u32,
+        with: impl Fn(u16, &crate::style_mask::StyleVariant) -> bool,
+    ) -> Option<kit::PixelRect> {
         let mine: Vec<u16> = self
             .variants()
             .filter(|&(id, v)| with(id, v))
             .map(|(id, _)| id)
             .collect();
-        self.ids_rect(pad, |id| mine.contains(&id))
+        self.ids_area(pad, |id| mine.contains(&id))
+    }
+
+    /// [`ids_area`](Self::ids_area) while the scissor is on, else `None`.
+    fn ids_rect(&self, pad: u32, with: impl Fn(u16) -> bool) -> Option<kit::PixelRect> {
+        if !self.scissors() {
+            return None;
+        }
+        self.ids_area(pad, with)
     }
 
     /// The screen bounds of the ids `with` picks, grown by `pad` and the
     /// mask's rounding ([`variants_rect`](Self::variants_rect)).
-    fn ids_rect(&self, pad: u32, with: impl Fn(u16) -> bool) -> Option<kit::PixelRect> {
-        if !scissor_enabled() {
-            return None;
-        }
+    fn ids_area(&self, pad: u32, with: impl Fn(u16) -> bool) -> Option<kit::PixelRect> {
         let mut uv = crate::style_mask::IdBounds::Nowhere;
         for (id, _) in self.style_ids.iter() {
             if with(id) {
@@ -661,14 +741,15 @@ impl StyleFrame<'_> {
         buffer: &wgpu::Buffer,
     ) -> Arc<wgpu::BindGroup> {
         self.bind(name, 0, || {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(name),
-                layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-            })
+            self.device
+                .create_bind_group_counted(&wgpu::BindGroupDescriptor {
+                    label: Some(name),
+                    layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
         })
     }
 
@@ -678,19 +759,20 @@ impl StyleFrame<'_> {
         layout: &wgpu::BindGroupLayout,
         view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(name),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(self.linear_sampler),
-                },
-            ],
-        })
+        self.device
+            .create_bind_group_counted(&wgpu::BindGroupDescriptor {
+                label: Some(name),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(self.linear_sampler),
+                    },
+                ],
+            })
     }
 }

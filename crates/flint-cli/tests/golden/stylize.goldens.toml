@@ -185,7 +185,7 @@ args = ["--no-grid", "--style", "ascii:scope=entities,normalize=1,exposure=0.5"]
 
 # --- ASCII in motion: the shimmer gate (#478) -------------------------------
 #
-# Sequence cases: no golden, a budget. Each draws 60 frames of the
+# Sequence cases: no golden, a budget. Each draws 30 frames of the
 # ascii_motion clearing on one renderer under the #277 bench's slow orbit
 # and counts, from the style's own grid, the glyphs that flip and the ones
 # that flip back (A-B-A reversals, which is what shimmer is). It fails when
@@ -201,6 +201,19 @@ args = ["--no-grid", "--style", "ascii:scope=entities,normalize=1,exposure=0.5"]
 #   edges, temporal = off  18.8            76.7
 #
 # So a history that stops holding fails both cases on reversals and flips.
+#
+# 30 frames, not 60 (#961): a frame is about 1.3 s on CI's WARP, so the two
+# cases were 160 s of the job. The means a frame don't depend on the count
+# (RTX 4070, Vulkan, 2026-11-20; at 20 / 30 / 60 frames):
+#
+#                      reversals/frame       flips/frame
+#   tone, history on    0.00 0.00 0.00      6.1  7.9  9.4
+#   tone, hysteresis 0  2.39 2.32 2.21     23.6 24.2 24.1
+#   edges, history on   0.17 0.18 0.12     13.1 15.3 17.6
+#   edges, hysteresis 0 3.11 3.46 3.50     38.2 39.8 40.5
+#
+# WARP at 60 (CI, the first run that read them): tone 0.00 / 9.4, edges
+# 0.09 / 17.5, the RTX's numbers.
 # A budget is a deliberate number: raise one only with the reason, and the
 # new measurement, here.
 
@@ -209,7 +222,7 @@ args = ["--no-grid", "--style", "ascii:scope=entities,normalize=1,exposure=0.5"]
 name = "ascii-motion-tone"
 scene = "tests/fixtures/scenes/ascii_motion.scene.toml"
 args = ["--no-grid", "--style", "ascii:edges=0"]
-frames = 60
+frames = 30
 orbit = 6.8755
 max_reversals = 0.5
 max_flips = 15.0
@@ -220,7 +233,7 @@ max_flips = 15.0
 name = "ascii-motion-edges"
 scene = "tests/fixtures/scenes/ascii_motion.scene.toml"
 args = ["--no-grid"]
-frames = 60
+frames = 30
 orbit = 6.8755
 max_reversals = 1.0
 max_flips = 30.0
@@ -418,6 +431,20 @@ name = "style-veil-echo"
 scene = "tests/fixtures/scenes/style_veil_echo.scene.toml"
 args = ["--no-grid", "--time", "2"]
 
+# A woozy pane veils where it is drawn (#1241): shallow wooze drifts a pane
+# of glass in front of a glyph crate, and the veil moves it as the main pass
+# did, so the crate's glyphs fade behind the glass and nowhere else; at its
+# rest pose glyphs showed through one side of the pane and its ghost dimmed
+# bare crate on the other. The still pane over the stone veils as before.
+# A rest-pose veil reads 2.64% past 48 and a mean of 1.68 here (main's
+# binary before #1241), close to the suite's glyph limits, so this case
+# takes tighter ones: a regression fails on both
+[[case]]
+name = "style-veil-wooze"
+scene = "tests/fixtures/scenes/style_veil_wooze.scene.toml"
+args = ["--no-grid", "--time", "2"]
+tolerance = { level = 48, share = 0.01, mean = 1.0 }
+
 # Billboards need no veil (#737): their alpha cuts them out and what's
 # kept writes depth, so the mask's own depth test leaves the two wisps out
 # of the stone behind them. #1011 masks a styled billboard; this one must
@@ -425,6 +452,27 @@ args = ["--no-grid", "--time", "2"]
 [[case]]
 name = "style-veil-billboard"
 scene = "tests/fixtures/scenes/style_veil_billboard.scene.toml"
+args = ["--no-grid"]
+
+# A styled billboard is masked (#1011): the middle wisp asks for ASCII, so
+# the mask draws its quad cut out by the same alpha the scene cut it by,
+# and only the wisp's shape turns to glyphs, over a pencil stone. The plain
+# wisp in front cuts through it by its depth. Before, the mask walked no
+# billboard and the wisp stayed a sprite. The mask, at 1x and 4x, then the
+# picture
+[[case]]
+name = "style-mask-billboard"
+scene = "tests/fixtures/scenes/style_mask_billboard.scene.toml"
+args = ["--no-grid", "--debug-mode", "style"]
+
+[[case]]
+name = "style-mask-billboard-msaa4"
+scene = "tests/fixtures/scenes/style_mask_billboard.scene.toml"
+args = ["--no-grid", "--debug-mode", "style", "--msaa", "4"]
+
+[[case]]
+name = "style-billboard-ascii"
+scene = "tests/fixtures/scenes/style_mask_billboard.scene.toml"
 args = ["--no-grid"]
 
 # A woozy mesh's mask (#737): shallow wooze moves a slab's and a skinned
@@ -612,6 +660,28 @@ scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
 args = ["--no-grid", "--style", "pencil:reveal=0,reveal_shape=wipe"]
 matches = ["--no-grid"]
 
+# Inverted (#1180): the style holds the frame outside the region and the
+# plain picture shows inside it, so an iris at 0.3 is the rendered clearing
+# in a circle with glyphs round it and the inked rim between. Inverted, the
+# ends swap: reveal 0 is whole-frame ASCII and reveal 1 the live frame,
+# byte for byte
+[[case]]
+name = "ascii-reveal-iris-invert"
+scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
+args = ["--no-grid", "--style", "ascii:reveal=0.3,reveal_shape=iris,reveal_invert=true,reveal_edge=3"]
+
+[[case]]
+name = "ascii-reveal-invert-zero"
+scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
+args = ["--no-grid", "--style", "ascii:reveal=0,reveal_shape=iris,reveal_invert=true"]
+matches = ["--no-grid", "--style", "ascii"]
+
+[[case]]
+name = "ascii-reveal-invert-one"
+scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
+args = ["--no-grid", "--style", "ascii:reveal=1,reveal_shape=iris,reveal_invert=true"]
+matches = ["--no-grid"]
+
 # Drawn on (#879): under transition = "draw" a blend is a front, not a
 # mix. Half-way, the whole frame has about half of each outline, the
 # hatching a stroke at a time behind it and the paper's wash just begun,
@@ -654,28 +724,6 @@ args = ["--no-grid", "--style", "contour:width=1.5"]
 name = "contour-over-kuwahara"
 scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
 args = ["--no-grid", "--style", "kuwahara:radius=4", "--style", "contour:width=1.5"]
-
-# The old flags (hidden since #708, gone in the next release) are its
-# table's keys, as --set and --style are a post key's and a style's
-[[case]]
-name = "contour-flags-are-its-table"
-scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
-args = ["--no-grid", "--contour-width", "1.5", "--contour-color", "0.2,0.05,0.02"]
-matches = ["--no-grid", "--style", "contour:width=1.5,color=0.2/0.05/0.02"]
-
-# #708: the old post flags are --set, pixel for pixel
-[[case]]
-name = "post-flags-are-set"
-scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
-args = ["--no-grid", "--exposure", "1.4", "--fog-density", "0.05", "--grade-gain", "1.04,1,0.94", "--ssao-intensity", "0"]
-matches = ["--no-grid", "--set", "post.exposure=1.4", "--set", "post.fog_density=0.05", "--set", "post.fog_enabled=true", "--set", "post.grade_gain=1.04,1,0.94", "--set", "post.ssao_intensity=0", "--set", "post.ssao_enabled=false"]
-
-# #708: the old ASCII flags are --style and --set
-[[case]]
-name = "ascii-flags-are-style-and-set"
-scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
-args = ["--no-grid", "--ascii-scope", "screen", "--ascii-palette", "phosphor", "--ascii-cell", "12"]
-matches = ["--no-grid", "--style", "ascii:scope=screen,palette=phosphor,color=palette", "--set", "ascii.cell=12"]
 
 [[case]]
 name = "contour-blend-zero"
@@ -771,6 +819,18 @@ args = ["--no-grid", "--style", "risograph"]
 name = "user-style-contour-map"
 scene = "tests/fixtures/scenes/user_styles.scene.toml"
 args = ["--no-grid", "--style", "contour_map"]
+
+# Darkroom: a user style that reads images (#413), the one case that does.
+# Its LUT (`[options.grade]`, read by `flint_lut_grade`) is the default
+# warm print; its paper is an image option picked from the folder's
+# discovered choices, kraft, tiled with mips; gloss is a choice option.
+# From #759 to #984 the fixtures' copy borrowed its images by a `../` path
+# an image option refuses, so `--style darkroom` was an unknown style and
+# no case noticed (#1056)
+[[case]]
+name = "user-style-darkroom"
+scene = "tests/fixtures/scenes/user_styles.scene.toml"
+args = ["--no-grid", "--style", "darkroom:paper=papers/kraft.png,finish=gloss"]
 
 # A style whose WGSL fails (tests/golden/fixtures/styles/broken.*) must draw
 # its input unchanged and say where it failed. The passthrough runs the
@@ -1060,3 +1120,15 @@ args = ["--no-grid", "--style", "underwater:depth=0.4,churn=0.3,daylight=1"]
 name = "reality-tron-iris"
 scene = "tests/fixtures/scenes/stylize_props_plain.scene.toml"
 args = ["--no-grid", "--style", "tron:blend_source=tear", "--set", "post.tear=0.45", "--set", "post.tear_iris=true"]
+
+# Tron on a ground plane at a grazing angle (#1181): 2 m above a 500 m tiled
+# plane, 5 degrees below the horizon. Its depth climbs steeply from pixel to
+# pixel there, which the first difference read as a silhouette everywhere:
+# main fills the ground from about 30 m out to the horizon with glow (the
+# horizon's rows read a mean luma of 193, against 49 now). The grid's lines
+# thin and fade toward the horizon instead of breaking into dashes, and the
+# crate keeps its outline
+[[case]]
+name = "reality-tron-ground"
+scene = "tests/fixtures/scenes/tron_ground.scene.toml"
+args = ["--no-grid", "--style", "tron"]

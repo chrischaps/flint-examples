@@ -17,6 +17,7 @@
 
 use super::SceneRenderer;
 use crate::camera::Camera;
+use crate::gpu_counts::CountedDevice;
 use crate::panels::{panel_camera, PanelCompositor, PanelLayout, PanelRect};
 use crate::postprocess::{PostProcessConfig, PostProcessResources};
 use std::collections::HashMap;
@@ -214,6 +215,10 @@ impl SceneRenderer {
         let posts = std::mem::take(&mut self.panel_state.posts);
         let last = layout.panels.len() - 1;
         let mut submissions = 0;
+        // A described page names the camera its panels' are made from (#1176)
+        if let Some(log) = &mut self.frame_log {
+            log.page_camera = Some(crate::frame_replay::CameraState::of(camera));
+        }
         for (i, (spec, rect)) in layout.panels.iter().zip(&rects).enumerate() {
             let size = rect.size();
             let fits = views.get(&spec.name).is_some_and(|v| {
@@ -308,6 +313,7 @@ impl SceneRenderer {
                 timer: None,
                 log: self.frame_log.take(),
                 taps: Some(taps),
+                knobs: None,
             };
             self.tap_pass(device, &mut scopes, encoder, "Panels");
             self.frame_log = scopes.log;
@@ -334,7 +340,7 @@ impl SceneRenderer {
             height: size.1,
             depth_or_array_layers: 1,
         };
-        let color = device.create_texture(&wgpu::TextureDescriptor {
+        let color = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some("Panel Picture"),
             size: extent,
             mip_level_count: 1,
@@ -348,7 +354,7 @@ impl SceneRenderer {
             view_formats: &[],
         });
         let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let depth = device.create_texture(&wgpu::TextureDescriptor {
+        let depth = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some("Panel Depth"),
             size: extent,
             mip_level_count: 1,

@@ -1,5 +1,7 @@
 # Audio
 
+> **Package:** `engine`: every game has it. Its audio is grouped in the engine's manifest as the package it becomes in a later phase, with no switch yet ([Packages](packages.md)).
+
 Flint's audio system provides spatial 3D sound via the `flint-audio` crate, built on [Kira](https://github.com/tesselode/kira) 0.11. Sounds can be positioned in 3D space with distance attenuation, played as ambient loops, or triggered by game events like collisions.
 
 ## Spatial Audio
@@ -52,16 +54,22 @@ volume = 0.7
 
 [audio.buses.music]          # a built-in bus takes a starting volume, not a parent
 volume = 0.8
+duck = { under = "voice", by_db = -9, attack = 0.08, release = 0.6 }
+
+[audio.buses.radio]
+parent = "sfx"
+lowpass = 3000               # starts muffled: its own low-pass, Hz
 ```
 
 ```
 main  ──┬── sfx       (the default: one-shots and sources that name no bus)
-        │    └── ui
-        ├── music
+        │    ├── ui
+        │    └── radio   (low-pass 3000 Hz)
+        ├── music        (ducks 9 dB while voice plays)
         └── voice
 ```
 
-A bus's `parent` is another bus, or `master` (the default) for the main track; `volume` is where it starts, linear, 1 by default. A bus's volume scales everything under it, its children's buses included. A mistake in the table (a parent that isn't a bus, a loop, an unknown key, a negative volume) is an error naming `flint.toml` and the key, and the game keeps the buses it had. The game's buses are numbered after the built-in two, by name with each parent first, and are made in the mixer whether it runs on this thread or in the browser's worklet.
+A bus's `parent` is another bus, or `master` (the default) for the main track; `volume` is where it starts, linear, 1 by default; `lowpass` is its own low-pass cutoff in Hz, from 10 to 20000 (open, the default). A bus's volume and low-pass act on everything under it, its children's buses included. A mistake in the table (a parent that isn't a bus, a loop, an unknown key, a negative volume, a cutoff out of range, a duck under no bus) is an error naming `flint.toml` and the key, and the game keeps the buses it had. The game's buses are numbered after the built-in two, by name with each parent first, and are made in the mixer whether it runs on this thread or in the browser's worklet.
 
 Opt a source into a bus in the scene:
 
@@ -73,7 +81,14 @@ loop = true
 autoplay = true
 ```
 
-A script names a bus in `play_sound`'s options (`#{ bus: "voice" }`) and turns one up or down by name with `set_bus_volume("voice", 0.5)`. A name that is no bus is reported once: a sound plays on `sfx`, and `set_bus_volume` changes nothing.
+A script names a bus in `play_sound`'s options (`#{ bus: "voice" }`), turns one up or down by name with `set_bus_volume("voice", 0.5)` and muffles one with `set_bus_lowpass("sfx", 800)` (back with `20000`). A name that is no bus is reported once: a sound plays on `sfx`, and `set_bus_volume` and `set_bus_lowpass` change nothing.
+
+### Ducking
+
+A bus with a `duck` dips while anything plays on its `under` bus, or on a bus under that one, and comes back once nothing does: `by_db` down (0 or less, -9 by default) over `attack` seconds (0.08), back over `release` (0.6). Only `under` is required. Music under dialogue is the usual one: a script plays its line on `voice` and the score makes room, with no fade written in the script that speaks.
+
+The engine knows what it started on each bus, so a duck needs no metering: a script's sounds (until they end or are stopped), placed one-shots, an extension's or a trigger's one-shot (for its length), and `audio_source`s that are playing (not paused out of earshot or at volume 0). A line played at volume 0 still ducks; a loop an extension plays itself doesn't. The dip multiplies the volume the game asked for, so `set_bus_volume` while ducked keeps the dip, and it reaches the mixer as a bus volume, here or in the browser's worklet. A bus can't duck under itself, nor under a bus above or below it (its own sounds would duck it).
+
 
 The CLI's flags scale the built-in two from where the game starts them:
 
@@ -83,12 +98,55 @@ flint play scene.toml --music-volume 0     # mute the score, keep the world
 ```
 
 **Bus gain multiplies underneath per-sound volume.** A script crossfading
-between two music beds keeps working at any bus gain, and a player who has
-turned the music down does not have their fades overridden.
+between two music beds keeps working at any bus gain.
+
+### The player's own volume
+
+A bus has a second volume, the player's: what a settings menu's "Music 40%"
+slider sets. The mixer hears the game's volume times the player's, so a script
+fading music to 0.5 under a player's 0.4 is heard at 0.2, and neither
+overwrites the other: the fade can't undo the setting, and the slider never
+moves the game's mix. A [duck](#ducking) comes on top of both: ducked, the bus is heard at
+the game's volume times the player's times the duck's gain.
+
+```rhai
+// A settings menu's slider, 0..1
+fn on_ui(id, event) {
+    if id == "music_slider" && event == "change" {
+        set_user_bus_volume("music", ui_get_value("music_slider"));
+    }
+}
+fn on_init() {
+    ui_set_slider("music_slider", user_bus_volume("music"));
+}
+```
+
+`set_user_bus_volume(bus, volume)` takes 0 to 1 (a value outside is
+clamped; a boost is the game's own volume) and is read back by
+`user_bus_volume(bus)` on the same frame; a bus the player never set reads 1.
+The player keeps the setting between runs without the game saving it: it is
+written half a second after the last change, at a scene transition and on
+exit, and read at the next start before the first sound and before `on_init`.
+It lives in the player's own config folder, beside the game's saves, as
+`<config>/<game id>/audio.toml` (`%APPDATA%`, `~/.config` or
+`~/Library/Application Support`; the id is `[project] id` in `flint.toml`),
+or `<config>/flint/audio.toml` for a game with no id; in the browser it is the
+`localStorage` entry `flint:/config/<game id>/audio.toml`. With `--save-dir`
+it is that folder's `audio.user.toml`, and `flint playtest` keeps it in memory.
+A saved bus the game no longer declares is kept, for the build that does.
+
+```toml
+# <config>/radio_play/audio.toml
+[buses]
+music = 0.4
+```
 
 The master low-pass applies to every bus, so `set_audio_lowpass` muffles the
 entire mix — score included — which is what you want when the effect is
 "something is between you and the world" rather than "the sfx got quieter".
+A bus's own `set_bus_lowpass` is the other case: the world underwater while
+the score plays on clear. A bus whose low-pass is open costs nothing; one
+that is muffled costs about as much as a voice.
 
 When the page holds the game (it is hidden, or paused by the browser), every bus under the main track fades out and comes back to the volume it was at.
 
@@ -212,7 +270,11 @@ Audio can be controlled from [Rhai scripts](scripting.md) using deferred command
 | `stop_sound(handle_or_name, fade)` | As above, fading out over `fade` seconds |
 | `set_sound_volume(handle, volume)` | Set a playing sound's volume (0.0--1.0) |
 | `set_sound_volume(handle, volume, fade)` | Fade it there over `fade` seconds |
+| `is_sound_playing(handle)` | Whether that sound is still playing, as the frame began: `true` from the frame after `play_sound` until it ends or is stopped |
 | `set_bus_volume(bus, volume)` | Set a [mixer bus](#mixer-buses)'s volume by name (`"music"`, `"voice"`...): it scales every sound on the bus and on the buses under it |
+| `set_bus_lowpass(bus, cutoff_hz)` | Set a [mixer bus](#mixer-buses)'s own low-pass by name: `set_bus_lowpass("sfx", 800)` muffles the bus and the buses under it, nothing else; `20000` opens it |
+| `set_user_bus_volume(bus, volume)` | Set [the player's own volume](#the-players-own-volume) for a bus (0..1), heard times the game's and saved for the next run |
+| `user_bus_volume(bus)` | The player's own volume for a bus; 1 for one they never set |
 | `audio_position(entity)` | Seconds into the sound the entity's `audio_source` is playing, wrapped for a loop, on the mixer's clock; `-1.0` before it has started and after it ends. See [Keeping time with the music](#keeping-time-with-the-music) |
 | `audio_output_latency()` | How long after it is mixed a sound is heard, seconds, where the platform says (the browser); `-1.0` where it doesn't (the desktop) |
 
@@ -248,6 +310,23 @@ fn on_interact() {
 }
 ```
 
+`is_sound_playing(handle)` says whether a sound is still going, so a script can wait for one voice line to finish before it starts the next:
+
+```rust
+let lines = ["guide_hello", "guide_follow_me", "guide_mind_the_gap"];
+let next = 0;
+let speaking = 0;
+
+fn on_update() {
+    if next < lines.len() && !is_sound_playing(speaking) {
+        speaking = play_sound(lines[next], #{ bus: "voice" });
+        next += 1;
+    }
+}
+```
+
+- `is_sound_playing` reads what the mixer said as the frame began. It is `true` from the frame after `play_sound`, until the sound plays out or the frame after `stop_sound`; the frame a sound is started or stopped it still gives the answer from before the call. A loop is playing until it is stopped, even while faded to 0.
+- It is `false` for a sound that never started: a name that finds no file, no sound device, a one-shot placed out of earshot, the web before Begin. It is `false` for a handle that was never given (`0`, `-1`, any other number) and always `false` in a headless capture (`flint render --scripts`), which has no sound. On the web a one-shot's end is reckoned from its length, since the worklet reports only the voices it watches.
 - `stop_sound(handle)` stops one sound. `stop_sound(name)` stops every sound a script started under that name, found the same way `play_sound` finds it (see [Sound names](#sound-names)). Neither touches `audio_source`s or trigger sounds.
 - A stop or volume change with no fade still takes 10 ms, so a cut doesn't click.
 - A handle for a sound that has ended, was stopped, or never started (an unknown name, a one-shot placed out of earshot) does nothing and gives no warning.
@@ -259,6 +338,8 @@ fn on_interact() {
 
 A sound is cached under its file's path from the folder that holds its `audio/`, extension included: `audio/door_open.ogg`. The preload reads every `audio/` the scene can see ([beside the scene, beside each directory above it up to the project root, then the engine's](assets.md#where-the-engine-looks-for-a-file)), and a nearer file hides a farther one of the same file name. That full name always works. A name that isn't cached as written tries `audio/<name>`, then `audio/<name>.ogg`, `.wav`, `.flac` and `.mp3`, in that order, so `"door_open"`, `"door_open.ogg"` and `"audio/door_open.ogg"` all play the same file. A sound cached under exactly the name given wins over the search (one an extension loaded as `"blip"` is `"blip"`), and two files that share a stem want the full path, since the search takes the first extension it finds.
 
+A name nothing cached is looked for, the first time it is played, the way an `audio_source.file` is: a path from the scene's folder or from any folder above it up to the project root, then each `audio/` on the way, then the engine's ([where the engine looks](assets.md#where-the-engine-looks-for-a-file)). So `play_sound("../sfx/door.ogg")` plays a file outside every `audio/`, and so does any sound with `preload_audio = false`. The file is kept under the name as written. A small one is decoded and plays at once; a large one (a song) misses that first play and is decoded over the next frames, so preload what must sound the first time. `flint check` holds a script's sound strings to this same search, so a sound the check passes is one the player finds, and one it reports (`missing-file`, with the paths tried) plays nothing. A file beside the script, or in some other asset folder, is in neither.
+
 A name that finds nothing plays nothing. The warning names the nearest cached sound, by file stem first:
 
 ```text
@@ -269,7 +350,7 @@ Extensions' `ctx.audio.play` resolves names the same way.
 
 A placed sound is at full volume within `min_distance` and silent past `max_distance`. Between them it is `-60·r^rolloff` dB, where `r` is how far the listener is along the way from one to the other. The default `rolloff` of 2 holds a sound up most of the way and drops it near `max_distance`, which suits a small room. A sound heard across open ground wants a rolloff below 1: it falls away soon after `min_distance` and then tails off slowly, close to a real sound's inverse-distance fade. For example, `rolloff: 0.6` between 32 m and 1250 m stays within 1.5 dB of `(32/d)^1.2` out to 300 m.
 
-Sound names match files in the `audio/` directory. All `.ogg`, `.wav`, `.mp3`, and `.flac` files are automatically loaded at startup.
+Sound names match files in the `audio/` directory. All `.ogg`, `.wav`, `.mp3`, and `.flac` files there are loaded at startup; a path to a file elsewhere is loaded on its first play (see [Sound names](#sound-names)).
 
 ## Keeping time with the music
 

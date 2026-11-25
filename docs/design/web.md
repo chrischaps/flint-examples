@@ -548,6 +548,14 @@ the page's `#perf` panel):
   `requestAnimationFrame` loop of the page's own, timed by rAF's
   timestamps. Timing the player's callbacks instead showed jitter that no
   one sees (p99 23 ms where rAF said 16.8).
+- **mean** (#1318): the window's span over its frames, which doesn't snap to
+  refreshes, marked `GPU-bound` with its inputs when the page is unpaced
+  (`fps=native`), the player's work is under half the frame and the frames
+  miss the refresh (read from the same rAF intervals,
+  `frame_rate::estimate_refresh`). Then it is the GPU's ms a frame, the
+  number #568 counted submissions for: Float with Kuwahara at 3840x2160 in
+  Chrome read p50 33.4 and mean 38.4 against timestamps of 38.2 to 39.1
+  (`tools/web-perf/README.md`, "GPU-bound pages").
 - **worst**: the longest gap between the player's frames, and how much of
   it was the player's own work. A long frame with little work in it is the
   browser's, not ours.
@@ -776,16 +784,16 @@ RTX 4070 laptop, release build, 1920x1080 output, `flint render
 | full screen at `--pixels-per-point 2` (16 px cells) | | 0.043 / 0.040 | |
 
 Re-measured for #337 after edges (#267) and tone normalisation (#289)
-were on by default and in the demo. Same machine, Vulkan, `--ascii-scope
-screen`, best of 3 alternated with main:
+were on by default and in the demo. Same machine, Vulkan, `--style
+ascii:scope=screen`, best of 3 alternated with main:
 
 | | main (b9aabc3) | #337 |
 |---|---|---|
 | edges on (default), no styled entities | 0.39--0.43 | 0.43 ms |
 | edges on, over the demo's props | 0.518 | 0.447 ms |
-| `--ascii-edges 0`, no styled entities | 0.049 | 0.048 ms |
-| `--ascii-edges 0`, over the props (barrel normalised) | 0.150 | 0.094 ms |
-| `--ascii-edges 0`, over the props, no `normalize` | 0.075 | 0.074 ms |
+| `--style ascii:edges=0`, no styled entities | 0.049 | 0.048 ms |
+| `--style ascii:edges=0`, over the props (barrel normalised) | 0.150 | 0.094 ms |
+| `--style ascii:edges=0`, over the props, no `normalize` | 0.075 | 0.074 ms |
 
 Most of the gap was the statistics: one fragment a lattice row walked
 320 samples, 180 threads in all, latency-bound. Summed in runs of 20,
@@ -1093,6 +1101,20 @@ of the control). `edges = 0` in a scene's
 at the price of the line glyphs. A cheaper edge detector for phones
 (half resolution, the steps alone, or the flat test as its own small
 pass in front of the heavy one) is the follow-up.
+
+**Without the wasm patch (#1317).** The page now takes
+`?skip_pass=Style%20edges`, which leaves out the shared edge pass's
+work. Its readers still get the edge target, empty from the first frame,
+as the "returning at once" stub above left it. It also takes
+`?repeat_pass=<label>:<N>`, which draws a part N times. Both are keyed by
+the GPU rows' labels, so a site copy with a patched shader is needed only
+to cut part of a pass, as the "full path skipped" row did. The book's
+Profiling guide, "Costing a part without timestamps", says how. Checked
+in desktop Chrome 157 (RTX 4070, `tools/web-perf/run.mjs`, the ASCII
+edges fixture, 1920x1080, 2026-11-20) on the branch's Play-site build:
+the page recorded 27 render passes a frame, 26 with the skip (and no
+`Style edges` row), and 30 with `repeat_pass=Style%20edges:4`. The edge
+lines left the picture. The Pixel's figure is still to be taken.
 
 ## Touch (#132)
 
@@ -1816,8 +1838,12 @@ thread talks to it by `postMessage`:
   error, no `ready` within 4 s), `AudioEngine::poll` notices, starts the old
   main-thread stream, and `AudioSystem` replays its sources. `?mixer=main`
   asks for the main thread outright, for comparisons. A scene with a
-  `music_session` also stays on the main thread: the suite clocks itself on
-  kira's manager (`manager_mut`), which only exists there.
+  `music_session` mixes in the worklet too since #1216 (ADR 0135): the suite
+  plays on `flint_audio::clocked::ClockedMixer`, whose remote side is the
+  `ClockNew`/`StemBusNew`/`StemPlay`/`..At` commands, and its clock's ticks
+  come back in the worklet's reports. Until #1216 it stayed on the main
+  thread. If the worklet fails, the suite starts again on the main-thread
+  mixer (`AudioEngine::mixer_epoch`).
 - The worklet's `AudioContext` asks for `latencyHint: "balanced"` and runs at
   the device's own rate (48 kHz on most phones), so the browser no longer
   resamples kira's 44.1 kHz output.
@@ -1947,6 +1973,37 @@ gzip -9:
 | after #754, without `music`, `rhythm`, `procgen` and `living` | | 11.23 MB | 4.28 MB |
 | after #754, `--no-default-features` | | 10.92 MB | 4.14 MB |
 
+### Packages (#1336)
+
+What leaving the feature packages out saves, measured once by hand on
+2026-11-25 at `8c4501ec` plus #1336's branch (Windows 11, x86_64 MSVC, rustc
+1.99.1, trunk 0.21.14 with its wasm-opt 123 `-Oz`, gzip -9 of the `.wasm`).
+**All** is the default build: every package. **None** leaves out every
+package (living, music, rhythm, procgen, debug-hud) and keeps the devices
+(`audio`, `gamepad`) and `frame-history`. **Standard** keeps the standard
+tier (procgen, debug-hud): what a game listing none of the feature packages
+gets. The desktop builds share one target dir, one after the other; the web
+builds run from `crates/flint-player`, where `index.html` is.
+
+| Build | Command | Size | gzip -9 |
+|---|---|---|---|
+| Release player, all | `cargo build --release -p flint-player --bin flint-player` | 77.04 MB | |
+| Release player, standard | the same `--no-default-features --features audio,gamepad,frame-history,debug-hud,procgen` | 74.26 MB (-3.6%) | |
+| Release player, none | the same `--no-default-features --features audio,gamepad,frame-history` | 70.20 MB (-8.9%) | |
+| Web `.wasm`, all | `trunk build --release --cargo-profile web-release` | 18.25 MB | **6.84 MB** |
+| Web `.wasm`, standard | the same `--no-default-features --features audio,gamepad,frame-history,debug-hud,procgen` | 17.65 MB | 6.60 MB (-3.5%) |
+| Web `.wasm`, none | the same `--no-default-features --features audio,gamepad,frame-history` | 16.62 MB | **6.19 MB** (-9.5%) |
+
+The packages are a tenth of either binary. Leaving them out saves 6.8 MB of
+desktop player and 0.65 MB on the wire. The rest is the kernel, and the
+render features and standard packages that have no switch yet (ADR 0136's
+later phases).
+
+The default web build is now 6.84 MB gzipped, against 4.70 MB at #754 and
+the "4 MB gzip line" above. A second `wasm-opt -Oz` pass over it saves 0.2%,
+so it was optimized. What grew between #754 and now is not measured here
+(#1526).
+
 The **size probe** is a throwaway bin, not committed. It builds a
 `PlayerApp` from a `black_box` world and passes opaque bytes to
 `rhai::Engine::eval`, `image::load_from_memory`, `toml::from_str` and
@@ -1974,7 +2031,7 @@ The showcase film is not part of the wasm or any bundle, so the 4 MB gzip
 line above doesn't count it. It is a click-to-play film on the Flint page,
 loaded on its own (`preload="none"` with its poster), and these are its
 sizes, recorded so the next cut can be held to them. The storyboard
-(`flint-examples/tools/showcase/storyboard.md`, "The 16:9 cut") has the whole table.
+(`flint-examples/film/storyboard.md`, "The 16:9 cut") has the whole table.
 
 | File | Size | |
 |---|---|---|

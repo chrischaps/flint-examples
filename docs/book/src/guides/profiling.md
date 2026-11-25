@@ -1,6 +1,33 @@
 # Profiling
 
-Two tools say where a frame's time goes. **GPU timing** shows how long the GPU spends on each phase of the frame, in the F2 overlay and in `RenderStats`. The **`profile` feature** sends the frame loop's CPU time to [Tracy](https://github.com/wolfpld/tracy), scope by scope. Both are off until asked for, and a build without the feature carries none of the profiler. For what a frame drew and with which GPU state, [capture it in RenderDoc or PIX](#capturing-a-frame-in-renderdoc), where Flint's frames are named part by part. Below the scopes, [a sampling profiler](#when-scopes-arent-enough) sees what no scope covers: wgpu, the driver, Rapier, Rhai.
+Two tools say where a frame's time goes. **GPU timing** shows how long the GPU spends on each phase of the frame, in the F2 overlay and in `RenderStats`. The **`profile` feature** sends the frame loop's CPU time to [Tracy](https://github.com/wolfpld/tracy), scope by scope. Both are off until asked for, and a build without the feature carries none of the profiler. For what a frame drew and with which GPU state, [capture it in RenderDoc or PIX](#capturing-a-frame-in-renderdoc), where Flint's frames are named part by part. Below the scopes, [a sampling profiler](#when-scopes-arent-enough) sees what no scope covers: wgpu, the driver, Rapier, Rhai. On a phone, start with [the next section](#profiling-on-a-phone): there most GPU times read zero.
+
+## Profiling on a phone
+
+On a phone most of this page reads wrong or not at all, and the two obvious fallbacks measure nothing. This is what works in the web player on a Pixel 8 Pro (Mali-G715, Chrome), learned in #378 and #568. The drivers are in [`tools/phone-perf/`](https://github.com/chrischaps/Flint/blob/main/tools/phone-perf/README.md), which says how to build the site and bundle and reach the phone over adb.
+
+- **The GPU list is empty past `Scene`.** Chrome offers `timestamp-query` on the phone, but Mali reads 0.00 ms for every pass after `Scene`: SSAO, Bloom, Composite and ASCII alike. `?perf=1`, F2 and traces are good there for `Grass`, `Shadows` and `Scene` only.
+- **Make the page GPU-bound and count frames.** One frame's time snaps to whole refreshes, so a pass that costs 2 ms reads as nothing or as half the frame rate, depending on where the frame sat. At `?scale=1` (the scene at the canvas's full size) even a no-style control takes about 30 ms on the Pixel. With frames unpaced (`fps=native`) every page is then GPU-bound, and 10 000 / frames in 10 s is the GPU's milliseconds a frame. [`submits.mjs`](https://github.com/chrischaps/Flint/blob/main/tools/phone-perf/submits.mjs) counts the player's submissions in the page (one a frame) and the render passes between them, a round at a time:
+
+  ```bash
+  # items split on ';'; 12 s warm-up a page; 5 rounds, each playing every item once
+  BASE='&scale=1' node tools/phone-perf/submits.mjs <out> \
+    "ascii_none;ascii_none+style=ascii;ascii_none+style=ascii:edges=0" 12 5
+  ```
+
+  The readout does the same count itself (#1318): under `?perf=1&fps=native` its `mean` row is the window's span over its frames, marked `GPU-bound` when the page is, with the inputs it judged by ([The mean frame](#the-mean-frame-and-when-it-is-the-gpus)). `submits.mjs` stays the count from outside the player.
+
+- **Bisect by removing one pass.** The wasm holds each shader's WGSL as written, so a copy of the site whose wasm has one shader's text swapped for text of the same length that returns early behind a runtime test (`if in.position.x > -1.0 { return ..; }`) keeps that pass's pipeline and drops its work. An item `dir/scene` plays the copy in `dir/` ([the README](https://github.com/chrischaps/Flint/blob/main/tools/phone-perf/README.md#a-passs-cost-submitsmjs-568) has the details). That is how #568 found the shared edge pass was three quarters of ASCII's cost. Try a shader idea this way before a trunk build: a patch needs no build, and #568's trunk build took sixteen minutes. Skipping a pass by its label, on any GPU and without a patch, is #1317.
+- **Heat moves every number.** On the charger the phone reaches thermal status 1--2 within minutes and drops from 120 to 60 Hz. Play five or six rounds, read each page against its own round's control, and keep the thermal state the drivers log with each load.
+- **One run at a time.** The phone is shared between sessions: take the pixel lock first (the README says how), check that nobody is using the phone, and close stray localhost tabs. A driver killed by a timeout leaves its page drawing, and two live tabs made #568's control wander from 28 to 41 ms.
+
+What doesn't work, each tried in #568:
+
+- **Perfetto.** `gpu.renderstages` isn't on a user build: `perfetto --query` lists only `android.gpu.memory`, even after `setprop debug.graphics.gpu.profiler.perfetto 1` and a Chrome restart.
+- **`onSubmittedWorkDone`.** From `queue.submit` to the promise was about 24 ms on every page, the control included. It measures Chrome's latency, not the GPU's work.
+- **Paced frame times.** The phone's default, `fps=auto`, holds a steady rate and hides what a scene costs, and a frame count near the refresh isn't linear in cost.
+
+The measurements are in `docs/design/web.md`: [On a phone (#378)](https://github.com/chrischaps/Flint/blob/main/docs/design/web.md#on-a-phone-378), [The pass: the shared edges (#568)](https://github.com/chrischaps/Flint/blob/main/docs/design/web.md#the-pass-the-shared-edges-568), [Frame rate on phones (#140)](https://github.com/chrischaps/Flint/blob/main/docs/design/web.md#frame-rate-on-phones-140) and [The shipped games on a phone (#134)](https://github.com/chrischaps/Flint/blob/main/docs/design/web.md#the-shipped-games-on-a-phone-134). Getting a game onto the phone at all is [Playing on Mobile](playing-on-mobile.md).
 
 ## GPU timing
 
@@ -81,7 +108,7 @@ The first tenth of the frames (at most 30) are dropped while pipelines and the G
 
 Read p50 to compare two builds and p90 for how far one run can be trusted: two runs whose p50s are closer than their p90 − p50 haven't shown a difference. A machine whose GPU is shared with other work shows it here: a contended run has a wide p90 and max, and every pass reads high at once, including passes the change doesn't touch. `min` is the closest one run gets to the uncontended cost.
 
-`--gpu-time-json <file>` also writes it as JSON for tools: the adapter (`name`, `backend`, `driver`), the sizes, `frames_drawn` / `frames_timed` / `frames_dropped` / `frames_kept`, and for each pass and the `frame` total its `min_ms`, `p50_ms`, `p90_ms`, `max_ms`, `mean_ms` and `samples_ms`, each kept frame's raw time in order. A host can do the same through `GpuTimer::record(true)`, `flush` and `flint_render::gpu_timer::spread`.
+`--gpu-time-json <file>` also writes it as JSON for tools: `format` (`flint-gpu-time`) and `version`, the adapter (`name`, `backend`, `driver`), `build_profile` and `engine_commit`, the sizes, `frames_drawn` / `frames_timed` / `frames_dropped` / `frames_kept`, and for each pass and the `frame` total its `min_ms`, `p50_ms`, `p90_ms`, `max_ms`, `mean_ms` and `samples_ms`, each kept frame's raw time in order. Those pass fields are the ones `flint-player --perf-report` writes too, so `scripts/perf-compare.py` reads both ([Comparing two runs](#comparing-two-runs)). A host can do the same through `GpuTimer::record(true)`, `flush` and `flint_render::gpu_timer::spread`.
 
 A scope covers the GPU's time on the work inside it, plus any time the GPU sat idle inside it waiting for the CPU's next submission. `Shadows` and each post-process effect are several submissions, so on a CPU-bound frame they read a little high. Under vsync the GPU also waits for the window's next image before the first pass that draws into it. That pass is timed inside its own submission, so the wait falls between scopes and is in none of them: with vsync on or off, the figures are the GPU's own.
 
@@ -92,6 +119,78 @@ With `--exit-after` and `--stats`, the player prints the average GPU frame time 
 ```text
 [perf] avg GPU 2.73 ms/frame over 6692 timed frames no vsync
 ```
+
+### Costing a part without timestamps
+
+Some GPUs time nothing. On the Pixel 8 Pro's Mali every pass after `Scene` reads 0.00, so `?perf=1`, F2 and traces can't say which pass is slow. There the only way to cost a part is to take it away, or draw it more, and watch the frame time (#1317). Two knobs do that on any GPU. Each names a part by the label the rows above use, ignoring case:
+
+| Where | Skip a part | Draw it N times |
+|---|---|---|
+| `flint play`, `flint-player`, `flint render` | `--skip-pass "Style edges"` | `--repeat-pass "Style edges:4"` |
+| The web page | `?skip_pass=Style%20edges` | `?repeat_pass=Style%20edges:4` |
+
+Each takes several parts, comma separated or given again (`--skip-pass Bloom,SSAO`). A repeat is 1 to 256 times, and a later word for the same part replaces an earlier one. The player logs a `pass knobs:` line at start-up. A label that no part of the frame has gets one warning after the first frame, listing the parts drawn: `skip_pass / repeat_pass: no part of the frame is named `Edges` (yet); the parts drawn: Shadows, Scene, …`.
+
+- **Skip:** the part records no work. Its targets keep what they last held: zero (wgpu clears a texture when it makes it) when the part is skipped from the first frame, or else what it wrote before the skip began. Whatever reads those targets still runs, so the frame time drops by the part's own cost. A skipped part has no `--gpu-time` row and no F2 row, and a frame's description lists it as skipped with `skip_pass names it (#1317)`. A skipped `Style edges` still hands its target to the styles that read it, so ASCII, pencil and contour draw on edges that are empty or stale. That is what #568 did by hand when it stubbed `edges.wgsl` to return early. A skipped `Fog veil` keeps the composite's veiled path, a skipped `Grass` compute leaves the scene drawing the blades the last compute made, and a skipped `Composite` or `UI` leaves the window as it was.
+- **Repeat:** the part records its work N times inside its one timer scope and debug group, so its `--gpu-time` row reads N times its cost. The picture comes out the same, and a frame's description lists the part once. Only a part that redraws its targets whole each time can repeat. The rest draw once and print a warning, `repeat_pass: `ASCII` draws once: it keeps history from frame to frame, …`:
+  - `Grass` counts blades into draw arguments that reset once a frame.
+  - `World lines`, `Selection outline` and the player's `UI` blend over the finished picture.
+  - `ASCII`, and a user style with a `history` target, keep state from one frame to the next.
+
+  A style with a `reveal` or a tear blend has 16 uniform slots a frame. Repeated past that, its extra draws show it untorn.
+
+On the desktop the repeats grow in a straight line. The ASCII edges fixture at 1920x1080 on an RTX 4070 (Vulkan, debug build, `flint render tests/fixtures/scenes/ascii_edges.scene.toml --gpu-time 200`, p50 in ms), with `Scene` and `Style edges` repeated together:
+
+| N | `Scene` | `Style edges` | frame |
+|---|---|---|---|
+| 1 | 0.131 | 0.101 | 1.84 |
+| 2 | 0.220 | 0.179 | 1.83 |
+| 4 | 0.402 | 0.321 | 2.01 |
+| 8 | 0.801 | 0.643 | 2.73 |
+| 16 | 1.596 | 1.288 | 5.69 |
+
+That is about 0.10 ms a scene pass and 0.08 ms an edge pass. All five PNGs have the same bytes. The frame column grows more slowly than the two rows at small N because SSAO's spread is wider than what they add.
+
+On a phone the frame time is what changes. Run the page with `fps=native` and `?scale=1` so every frame is GPU-bound, and count frames, as `tools/phone-perf/submits.mjs` does. Each of its items is a scene and its query after a `+`, so spell a space in a label as `%20`:
+
+```bash
+BASE='&scale=1' node tools/phone-perf/submits.mjs out \
+  "ascii_none+style=ascii;ascii_none+style=ascii&skip_pass=Style%20edges" 12 5
+```
+
+The page that skips a part, run against the same page without the skip, gives that part's milliseconds. With `repeat_pass=<label>:4` instead, the page adds three more of the part's milliseconds. #568 needed a hand-patched wasm and a copy of the site for each pass to measure this.
+
+### What a pass costs before it draws
+
+Every pass has a floor: what it costs with nothing to do. Measure the floor before you spend effort cutting a pass's work or merging passes. If the floor is most of the pass's time, cheaper work won't show. If the floor is the gap you're trying to close, only fewer passes will close it.
+
+**Take the work out and keep the pass.** Point `FLINT_STYLE_SHADER_DIR` at a copy of `crates/flint-render/src`'s `stylize` folder ([Writing a style](../concepts/stylize-passes.md#writing-a-style) shows how the folder is read). Then make the pass's fragment return at once with a line the compiler can't fold away, such as `if u.size.x > 0.0 { return vec4<f32>(0.0); }`. The pass still begins, clears, draws and ends, so its `--gpu-time` row now reads its fixed cost. Alternate that folder with an unstubbed copy, on one binary, as the control.
+
+**The floor of a bare pass** comes from `cargo run -p flint-render --example pass_floor`. It times four tiny passes the size of ASCII's tone statistics and variant cells, each shape built two ways: as render passes, and as dispatches of one compute pass. Add `WGPU_BACKEND=dx12` for the other backend. In microseconds on an RTX 4070 laptop (minimum of three processes, 16 sequences a bracket):
+
+| Four small steps | Vulkan | DX12 |
+|---|---|---|
+| One render pass alone | 2.3 | 1.2 |
+| One compute dispatch alone | 4.7 | 0.6 |
+| Four render passes, three chained | 7.4 | 3.8 |
+| Four dispatches in one compute pass, three chained | 7.3 | 5.8 |
+| Four compute passes, three chained | 19.0 | 6.8 |
+| Four render passes, none reading another | 7.3 | 2.4 |
+| Four dispatches in one pass, none reading another | 5.8 | 1.4 |
+
+A chained step costs about 2 µs whether it is a render pass or a dispatch. Most of that is the barrier its dependency needs, not the render pass's begin, clear and end. A compute pass saves only where the steps are independent, and on DX12 a chain of dispatches is slower than a chain of render passes. A full-screen pass at 1080p has a floor of its own, about 0.03 ms on the same GPU (#1257), and that one is the pixels.
+
+**Worked example (#1269).** Whole-frame ASCII with `edges = 0` over `ascii_entities`'s styled props cost over half again the plain case. The props add four small passes: three tone-statistics passes and the variant cells. The plan was to make them dispatches of one compute pass, so the floor was measured first: `flint render <case>.scene.toml --style ascii:scope=screen,edges=0 --gpu-time 240` on copies of the scene, 1080p, Vulkan, minimum p50 of three alternated runs, in ms:
+
+| Case | ASCII | Over plain |
+|---|---|---|
+| Plain (no prop styled) | 0.059 | |
+| Props styled, all off | 0.060 | +2% |
+| Props drawn, no `normalize` | 0.079 | +34% |
+| The demo (barrel `normalize = 1`) | 0.091 | +54% |
+| The demo, the four passes' work stubbed | 0.083 | +41% |
+
+The goal was 25% over plain, 0.074 ms. With every one of the four passes doing nothing, the demo is still at 0.083. Removing the four passes outright would save their floor, about 0.007, and leave roughly 0.076. The compute version doesn't even save that, since its chain costs the same. What remains is the styled props' own pixels in the glyph pass, so the render passes were kept.
 
 ### A frame's description
 
@@ -124,7 +223,7 @@ A pass, trimmed:
 ```
 
 - **Passes** are named by their GPU timer scope, so the `timed` ones, in order, are `--gpu-time`'s rows, and `gpu_ms` is that pass's raw time in this frame, not a smoothed figure. The frame is timed when the adapter has `TIMESTAMP_QUERY`. A pass with no scope of its own has `timed: false`: each shadow map layer (`Shadow cascade 0`, inside `Shadows`, with its casters), the depth upscale, and the composite while FXAA ends the chain.
-- **A skipped pass** is listed where it would have run, with why: `no grass in the scene`, `off ([post_process] volumetric_enabled = false)`, `capped by quality (ssao = false)`, `no style reads the albedo`, a style at `blend 0`, `no sun gives light and no spot casts`.
+- **A skipped pass** is listed where it would have run, with why: `no grass in the scene`, `off ([post_process] volumetric_enabled = false)`, `capped by quality (ssao = false)`, `no style reads the albedo`, a style at `blend 0`, `no sun gives light and no spot or point light casts`.
 - **Draws** come from the same choices the pass draws with, so the scene pass's `draws` are `RenderStats::draw_calls` exactly. Each names its entity, and `entity_id` is there for display only (ids move between runs, ADR 0126). `mesh` is a model's sub-mesh as `<asset>#<n>`, or `box` for a `bounds` box. Draws with one `material_id` share a material buffer. `culled` lists what this camera set aside: `frustum`, `lod` (another level of detail draws from here) or `draw distance`.
 - **The frame**: `frame` (size, scene size, render scale, MSAA, adapter, backend, debug view, every `--quality` setting, the drawn `[post_process]` by key, the styles in chain order), `targets` (every texture the frame drew into or read: its id, format, size, layers, samples and bytes), `memory`, `lights` (which were drawn and which a cap left out) and `stats`, the F2 overlay's totals. A comic page's panels are each a frame drawn again, so each has its own passes under `panels`, and the page's compositor is the top-level `Panels` pass.
 
@@ -134,14 +233,14 @@ With `--time`, the frame described is the span's last. `--report json` names the
 
 ### A frame's images
 
-`--frame-capture <dir>` writes the frame's description and every target each pass wrote, as that pass left it (#1085, [ADR 0126](https://github.com/chrischaps/Flint/blob/main/docs/adr/0126-what-a-frame-capture-holds-and-how-it-replays.md)): the shadow cascades, the HDR scene before post, SSAO, each bloom step, the style mask, each style's output and its own targets.
+`--frame-capture <dir>` writes the frame's description and every target each pass wrote, as that pass left it (#1085, [ADR 0126](https://github.com/chrischaps/Flint/blob/main/docs/adr/0126-what-a-frame-capture-holds-and-how-it-replays.md)): the shadow cascades, the HDR scene before post, SSAO, each bloom step, the style mask, the editor's selection mask, each style's output and its own targets.
 
 ```bash
 flint render flint-examples/stylize_props.scene.toml --frame-capture props.flintframe
 ```
 
 ```text
-Captured the frame to props.flintframe: 26 images from 10 passes, 5.1 MB on disk (143.0 MB read back), GPU-timed
+Captured the frame to props.flintframe: 33 images from 11 passes, 6.0 MB on disk (178.0 MB read back, copied in 8.10 ms on the GPU), GPU-timed
 ```
 
 ```text
@@ -155,18 +254,19 @@ props.flintframe/
     10-ssao.png
     12-bloom_mip_1-down.exr       a step of a pass that writes one target more than once
     14-style_display_ping_0.png   a style's output, then its own targets (ascii_cells_a ...)
+    14-ascii_edge_cells_past.exr  and the textures it holds itself: ASCII's edge history
     15-surface.png                the output, byte for byte the -o file
 ```
 
 - **Each target is kept once, exactly**: 8-bit targets as PNG, 16-bit integers (the style mask) as a 16-bit PNG, half floats (the HDR chain) as OpenEXR half, depth and 32-bit floats as OpenEXR f32 (channel `Z` for depth), the EXRs ZIP-compressed. No viewable copy sits beside an EXR: `flint frame image <capture> <pass> -o x.png` makes one (HDR tonemapped, depth stretched to grey, ids coloured; [The `frame` Command](../cli-reference/overview.md#the-frame-command)). An EXR opens in most image tools too.
-- **Read where it's written.** Each copy is made right after the pass, in the frame's own encoder, because the chain reuses its targets: a style stage's two pings, and bloom's mips, which the upsample writes over. So a ping written by two styles is two images, and bloom's are `threshold`, each `down` and each `up`. A multisampled target is read through its resolve (the HDR buffer), each shadow map layer that was drawn is its own image (a sun's cascades, a casting spot's `spot_shadow`), and a style's own targets are whatever it asked the chain's table for while it drew, so a user style's are there too.
-- **In the manifest**, each pass's `images` lists `target`, `step`, `layer`, `format`, `size`, `file` and `stored` (`png`, `png16`, `exr-half`, `exr-f32`, `exr-u32`, or `raw` for a format nothing else holds). `frame.capturing` is true. `capture` says what it cost: images, bytes read back and on disk, the targets a pass wrote that weren't read and why (`grass_instances` is a buffer), and the milliseconds spent recording the copies, waiting, copying out and encoding.
+- **Read where it's written.** Each copy is made right after the pass, in the frame's own encoder, because the chain reuses its targets: a style stage's two pings, and bloom's mips, which the upsample writes over. So a ping written by two styles is two images, and bloom's are `threshold`, each `down` and each `up`. A multisampled target is read through its resolve (the HDR buffer), each shadow map layer that was drawn is its own image (a sun's cascades, a casting spot's `spot_shadow`), and a style's own targets are whatever it asked the chain's table for while it drew, so a user style's are there too. A style that holds textures of its own notes each as it draws it (`StylePass::held_targets`, #1161): ASCII's edge cells, slots, thinned lines and outlines, the past edge cells and slots it read (`ascii.edge_cells.past`, only on a frame that followed on from the last), its tone statistics, variant cells, snap owners and dissolve state, each only on a frame that drew it. With `--select`, the `Selection mask` pass's `selection_mask` is read too; the `Selection outline` pass lists it under `reads`. Over a `--time` span the last frame is captured, so `--time 0..0.25` gives ASCII two frames to keep history from.
+- **In the manifest**, each pass's `images` lists `target`, `step`, `layer`, `format`, `size`, `file` and `stored` (`png`, `png16`, `exr-half`, `exr-f32`, `exr-u32`, or `raw` for a format nothing else holds). `frame.capturing` is true. `capture` says what it cost: images, bytes read back and on disk, the targets a pass wrote that weren't read and why (`grass_instances` is a buffer), and the milliseconds spent recording the copies, waiting, copying out and encoding. **The copies' GPU time** (#1160) is there too: each image's `gpu_copy_ms`, and `capture.gpu_copy_ms` for them all (`gpu_copies_timed` says how many were timed). They're timed on the capture's own timestamps, so the frame's GPU timer still times every pass, and they're `null` on an adapter without timestamp queries. A few copies a frame can read up to three times their size's worth, a different few each run, so compare the total rather than one image's. Bloom's step copies are inside Bloom's own `gpu_ms`.
 - **The last `surface` image is the output.** A pass that writes after it (the depth upscale below render scale 1) still follows it in the folder. A comic page's panels each have their own `surface`, the panel's picture, and the page's is the `Panels` pass's.
 - **A folder that holds anything but a capture is refused**, so a wrong path can't empty it; an earlier capture there is replaced.
 
 `flint frame show <capture>` reads it back as text or `--json`: the summary, each pass, each draw by entity, each target. `flint frame diff <a> <b>` names what changed between two, down to each entity's draws and each pass image's pixels ([The `frame` Command](../cli-reference/overview.md#the-frame-command)). `flint frame open <capture>` opens it in a window: the passes as a tree, each pass's image with zoom, exposure and a texel readout, its draws, and the frame's times ([The Frame Debugger](frame-debugger.md)).
 
-The capture costs only the frame that asked: no other frame makes a copy or a buffer, and every golden is byte-identical. The capturing frame does pay: the copies stay on its GPU timeline, and reading them back is the raw size of every target (72 MB for the tavern at 1280 x 720), which a headless render waits for. A host captures with `renderer.capture_next_frame(CaptureTargets { surface, depth })` (its own output and depth, each made with `COPY_SRC`), then after the submit `take_frame_capture()`, `map()` and `poll(&device)` on later frames until it says ready (never waiting), `read()`, `describe_frame(..)`, and `flint_render::frame_capture::write_capture(dir, &mut description, frame)` off the frame thread.
+The capture costs only the frame that asked: no other frame makes a copy or a buffer, and every golden is byte-identical. The capturing frame does pay: the copies stay on its GPU timeline (at 1920 x 1080 on an RTX 4070, 3.8 ms for the tavern's 98.7 MB and 9.3-10.5 ms for the woozy grove's 214.8 MB, more on a session's first capture), and reading them back is the raw size of every target (72 MB for the tavern at 1280 x 720). A headless render's `wait_ms` is next to nothing, since it reads the frame's pixels first and the copies were in that frame. [ADR 0126](https://github.com/chrischaps/Flint/blob/main/docs/adr/0126-what-a-frame-capture-holds-and-how-it-replays.md)'s measured section has the numbers, and why the spike's separate read-back waited 55 ms on the grove. A host captures with `renderer.capture_next_frame(CaptureTargets { surface, depth })` (its own output and depth, each made with `COPY_SRC`), then after the submit `renderer.take_frame_capture()` for the `FrameCapture`, `capture.map()` and `capture.poll(&device)` on later frames until it says ready (never waiting), `capture.read()`, `renderer.describe_frame(..)`, and `flint_render::frame_capture::write_capture(dir, &mut description, frame)` off the frame thread.
 
 ### Capturing from the running player
 
@@ -186,9 +286,10 @@ INFO player: [capture] wrote captures/tavern_hub-t2.004.flintframe: 18 images fr
 - **The folder** is the one `flint render --frame-capture` writes, named `<scene>-t<game time>.flintframe`. The player adds its own `UI` pass at the end, the HUD drawn over the frame, with the presented image. It also adds `trigger` (why), `scene` (path, `[scene] name`, SHA-256), `engine` (version, the commit the binary was built from and whether that tree had changes), `project` (the commit of the checkout the game's project is in, which in a game's repository is the game's own), `captured_at`, `frame.index`, `frame.game_time` and `frame.dt`, and `cpu`: the frame history's record of the frame and the second of frames before it, each with its phases, script callbacks, notes, physics steps and GPU time.
 - **A hitch can't be captured itself.** It is over by the time the detector judges it, because its clock comes in on the next tick. So `--capture-on-hitch` captures the frame after it. The manifest's `cpu.hitch` holds the hitch: its frame, ms, the median it stood out from, `player` or `elsewhere`, and the cause line the hitch log writes. Its record in `cpu.window` (`"hitch": true`) shows what it cost by phase. The images show the scene one frame later.
 - **Startup hitches are passed over.** The first 2 s of game time are loading's: scripts warming up, physics catching up, the first pipeline compiles. The exit report counts them on their own line, the hitch log marks them `startup` and `--max-hitches` doesn't hold them against a run ([Finding a hitch](#finding-a-hitch)), so `--capture-on-hitch` skips them too, and its N captures go to hitches from t = 2 s on. The first one it skips is said on the console (`[capture] passed over a startup hitch at t=1.32 s ...`). To capture the load itself, add `--capture-on-hitch-startup`.
-- **Replay inputs** go under `replay/` (ADR 0126 decision 4), for the replay to come (#1089). `world.toml` is every entity by name in a scene's encoding. `inputs.json` holds every `FrameInputs` field, the whole camera, the drawn config's styles, the quality, MSAA, render scale, debug mode, the selected entity, motion holds' kept matrices and ticks, part tints and softness, and the palette and particle indexes. `skinning.bin` holds every bone, shadow and echo palette, read back from the GPU. `particles.bin` is the packed particle stream as drawn. The manifest's `replay.assets` lists each model and texture by path and SHA-256, never a copy. `replay.fresh_only` lists what a replay will draw fresh for this frame (ASCII's history, a user style's history targets, runtime meshes, grass and terrain edits).
+- **Replay inputs** go under `replay/` (ADR 0126 decision 4), for the replay to come (#1089). `world.toml` is every entity by name in a scene's encoding. `inputs.json` holds every `FrameInputs` field, the drawn config's styles, the quality, MSAA, render scale, debug mode, the selected entity, motion holds' kept matrices and ticks, part tints and softness, and the palette and particle indexes. `skinning.bin` holds every bone, shadow and echo palette, read back from the GPU. `particles.bin` is the packed particle stream as drawn. The camera is the manifest's `camera`, the one the renderer drew the frame with (#1176), written once there so the replay and `flint frame image`'s depth in metres can't disagree; a capture from before it keeps the camera in `inputs.json`, and the replay reads it from there. `history/` holds each style's frame-to-frame history as the frame read it (#1136: ASCII's tone and edge cells, a user style's `history` targets; `inputs.json`'s `renderer.style_history` names each part and its key), so a replay of a moving ASCII frame draws it exactly. The manifest's `replay.assets` lists each model and texture by path and SHA-256, never a copy. `replay.fresh_only` lists what a replay will draw fresh for this frame (runtime meshes, grass and terrain edits, a style's reveal region).
 - **Two stepped runs give the same capture.** With `--frame-step`, two runs of the tavern wrote byte-identical images and replay files, and manifests that differ only in their timings.
-- **It never waits on the frame.** The capture is armed for one frame, and its copies go into that frame's one submission. The frames after poll the read-back, and a writer thread copies it out, encodes it and writes the folder on a quarter of the machine's cores, manifest last. One capture is in flight at a time, and a request made meanwhile waits for it. The capturing frame and every frame until the writer takes over are marked `capturing` in the frame history, and the hitch detector passes over them, so the capture isn't counted as the hitch it may cause. The writing still shares the machine: in a debug build, small hitches showed in the hot-reload poll while a capture was written to disk.
+- **It never waits on the frame.** The capture is armed for one frame, and its copies go into that frame's one submission. The frames after poll the read-back, and a writer thread copies it out, encodes it and writes the folder on a quarter of the machine's cores, manifest last. One capture is in flight at a time, and a request made meanwhile waits for it. The capturing frame and every frame until the writer takes over are marked `capturing` in the frame history, and the hitch detector passes over them, so the capture isn't counted as the hitch it may cause.
+- **The writer runs behind the game.** Writing still shares the machine with the frames after it. Before #1178, small hitches showed in the hot-reload poll of a debug build while a capture was written to disk. So the writer and each of its encoder threads ask the operating system for background priority. On Windows that is the scheduler's background mode, which lowers the thread's CPU, disk and memory priority. On Linux it is nice 10, and on macOS the background QoS class. The frames while it writes are the game's frames and are judged as usual, but each one carries a `capture write <folder>` [frame note](#hitches). A hitch then names the write as its likely cause (`reload poll 15 scripts watched, 21.3 ms; capture write tavern_hub-t4.005.flintframe`), unless a script took the time itself (`script stall.rhai:on_update 150.2 ms (also: capture write)`). `--capture-on-hitch` passes over such a hitch, because it may be the last capture's own cost, and says so once on the console. Measured in a release build of the tavern at 1280×720 under vsync, over 24 captures each: with a normal-priority writer, four of the seconds after a capture had a frame over 25 ms. In the background, none did. The price is on a busy machine, where a write waits behind every other program: most still took about half a second, but the slowest took 8 s instead of 2. Until such a write ends, it keeps its read-back (about 75 MB) in memory, and `--capture-on-hitch` passes over hitches.
 - **The Living Props split** (#238) draws its other side over part of the frame. The capture keeps the shown side's passes and images and says so in `notes`, and the `UI` image shows both.
 - **Desktop only.** The web player declines with a note: it writes no files, and its `image` has no EXR.
 
@@ -208,7 +309,62 @@ Under vsync the GPU finishes a frame and then waits for the display, and a GPU t
 … | present fifo-relaxed | … | gpu 3.90 ms under vsync at idle clocks (23% busy, reads high; FLINT_VSYNC=0 for pass costs): Shadows 0.17, Scene 1.94, SSAO 0.76, Volumetric 0.89, … | …
 ```
 
-Here the frame read 3.9 ms against 2.8 unlocked, about 1.4x; in #270 (DX12, 1080p) SSAO read 4.4 ms under vsync against 0.80 without, about 5x. To compare passes, take them with `FLINT_VSYNC=0` or with `flint render --gpu-time`, which presents nothing. The share is the GPU's frame time over the mean time between frames, not the median: under Fifo on a hybrid-GPU laptop frames come in bursts (see Frame pacing below), and the median frame there was 5 ms at a 60 fps mean.
+Here the frame read 3.9 ms against 2.8 unlocked, about 1.4x; in #270 (DX12, 1080p) SSAO read 4.4 ms under vsync against 0.80 without, about 5x. To compare passes, take them with `--vsync off` (or `FLINT_VSYNC=0`) or with `flint render --gpu-time`, which presents nothing. The share is the GPU's frame time over the mean time between frames, not the median: under Fifo on a hybrid-GPU laptop frames come in bursts (see Frame pacing below), and the median frame there was 5 ms at a 60 fps mean.
+
+#### The mean frame, and when it is the GPU's
+
+One frame's time snaps to whole refreshes under vsync: a frame whose GPU work takes 38 ms is shown at 33 or 50 ms, and the p50 says 33.4. The line's `mean` part doesn't snap. It is the window's span over its frames, and when the GPU is what holds the frames back, it is the GPU's time a frame. The line then says `GPU-bound`, with what it judged from:
+
+```text
+… | frame p50 33.4 p90 50.0 p99 50.1 max 50.1 ms (260 frames/10s) | mean 38.40 ms a frame, GPU-bound (guess: unpaced, player 2.48 ms, refresh 16.67 ms) | …
+```
+
+It is a guess from the CPU side, so it names its inputs. All three must hold:
+
+- **unpaced**: the web player has no `?fps=` pacer (`fps=native`). A paced frame waits for the pacer, so `?fps=60` or the phone's default `auto` never says GPU-bound.
+- **the player's work**, every phase but the swapchain's `acquire` and `present` waits, is under half the frame. A GPU-bound desktop frame spends its time in `acquire`, waiting for a free image, and that wait isn't counted as work.
+- **under vsync, the frames miss the refresh**: the mean is at least 1.15 refreshes. A frame that holds the refresh is the display's, however light its GPU. The refresh is the monitor's on the desktop and the pacer's on the web. An unpaced page reads it from the same frame intervals. With `FLINT_VSYNC=0` nothing holds the frames but the GPU, and the line says `no vsync` instead.
+
+Otherwise the part is just `mean 16.67 ms a frame`. Measured on an RTX 4070 laptop:
+
+| run | frame p50 | mean | GPU timestamps | flag |
+|---|---|---|---|---|
+| Chrome 157, Float + `style=kuwahara`, 3840x2160, `fps=native` | 33.4 | 38.40–38.78 | 38.2–39.1 | GPU-bound |
+| the same page, `fps=60` | 33.4 | 38.40–38.85 | 37.9–38.6 | none (paced) |
+| Chrome, Float, 3840x2160, `fps=native` | 16.7 | 16.67–16.75 | 7.5–8.8 | none (holds 60 Hz) |
+| `flint-player`, tavern, 3840x2160, vsync | 28.2 | 28.19 | 28.38 | GPU-bound |
+| `flint-player`, tavern, 1920x1080, `FLINT_VSYNC=0` | 6.8 | 7.13 | 6.83 | GPU-bound |
+| `flint-player`, a script busy 8 ms a frame, `FLINT_VSYNC=0` | 9.2 | 11.94 | 2.37 | none (player 11.6 ms) |
+
+In the browser the page also counted 258 to 261 submissions between two reads 10 s apart, one a frame, which is 38.3 to 38.8 ms a frame. A hitch in the window lengthens the mean: the 1080p tavern's other window held a 389 ms hitch and read 7.79 ms against 6.98. A frame held by the browser's own main thread or the compositor reads as GPU-bound too, so check a flagged window against the GPU times where the adapter has them. Where it doesn't, as on the Pixel 8 Pro whose Mali reads 0 for every pass after Scene, this is the number to read: `?perf=1&fps=native&scale=1` makes every page GPU-bound, and `tools/web-perf/run.mjs --rounds N` (or `tools/phone-perf/submits.mjs` on the phone) plays the pages in turns, so each is read against its own round's control.
+#### GPU objects a frame, and memory
+
+A renderer that makes a buffer or a bind group for each entity every frame gets slow on the CPU long before the GPU is busy: removing such allocations took a 270-entity scene from about 17 ms to 4. The renderer counts every GPU object it creates and every byte it uploads (`flint_render::gpu_counts`), so a steady frame can be checked to create nothing. Two parts of the perf line say it, natively and in the browser:
+
+```text
+… | gpu/frame create 0.0 (buffer 0.0 bindgroup 0.0 texture 0.0 pipeline 0.0) in 0 frames write 17.0 (27.4 KB) | gpu mem textures 102.1 MB (scene 8.2 style 8.5 shadow 64.0 model 21.3 glyph 0.0) meshes 6.3 MB device 9.2/114.6 MB | …
+```
+
+`gpu/frame` is the window's mean a frame: objects created (buffers, bind groups, textures, and pipelines with shader modules), how many frames of the window created any, and the buffer and texture writes with their bytes. Writes are expected every frame (uniforms, bones); objects are not. `gpu mem` is the texture memory the renderer knows it holds, by class: the frame's own targets (HDR, SSAO, bloom, MSAA, render scale, the water's grab), the style chain's, the shadow maps, model and material textures and glyph atlases, then mesh buffers. `device` is the device's own live buffer and texture memory, as wgpu tracks it on Vulkan and DX12 (it includes egui's and the player's targets, and drivers pad); the web has no such total, so the part ends at `meshes`. In the browser the same line also carries the page's `webgpu/frame` part, which wraps WebGPU's calls in JavaScript: two counts of the same frames, which should agree.
+
+F2's overlay shows the same under the draw counts, for the frame just ended (the overlay draws before its own frame is submitted): `Alloc/frame: 0` in grey on a steady frame and in amber with what was made (`Alloc/frame: 5 (3 buffers, 2 bind groups)`, a box spawned by a script) on one that created anything, a dim `last 1.2s ago:` row with what it made for ten seconds after, the frame's writes, and `GPU memory` by class with the device's totals. `--exit-after`'s report adds two lines:
+
+```text
+[perf] GPU objects a frame: 0.00 (0.00 buffers, 0.00 bind groups, 0.00 textures, 0.00 pipelines), in 0 of 600 frames; 17.0 writes (27.4 KB)
+[perf] GPU memory at exit: textures 102.1 MB (scene 8.2 style 8.5 shadow 64.0 model 21.3 glyph 0.0) meshes 6.3 MB device 9.2/114.6 MB
+```
+
+A frame that creates objects also leaves a `gpu objects` frame note (`2 buffers, 1 bind group`), so a hitch's line names it beside its cause (`render +60.0 ms (also: gpu objects)`). A count is evidence, not a measured time, so it never takes the blame by itself. A host reads the frame's count with `SceneRenderer::frame_gpu_calls()` and the memory with `SceneRenderer::gpu_memory()`; `RenderStats` carries both as `gpu_calls` and `gpu_memory`.
+
+#### When the adapter's timestamps read zero
+
+Some GPUs write timestamps that carry no time. On the Pixel 8 Pro (Mali-G715, Chrome) every scope after `Scene` reads exactly zero ticks, frame after frame, and a list of `0.00`s looks like an answer: #378 lost a run reading one. So the timer checks its raw read-backs, a window of 60 frames at a time (`GpuTimer::timestamps`, `RenderStats::gpu_timestamps`): when at least two scopes, and at least half of them, read exactly zero ticks in every frame of a window, the times are called unusable, and each reader says so in place of the list. The F2 overlay's GPU section, `?perf=1`'s panel and the copied line say `GPU pass times unavailable on this adapter` with the count behind it:
+
+```text
+… | worst scripts: … | GPU pass times unavailable on this adapter (5 of 7 scopes read 0 ticks for 60 frames) | 8 draws 90.9K tris
+```
+
+A trace's `gpu` track then holds one mark of that name instead of the zero spans, and its header a `gpu_pass_times` line; `--exit-after` adds a warning under its `[perf] avg GPU` line, since that total counts only the scopes that read. A real pass is never exactly zero ticks for a whole window: an empty one is about 2 µs, and a browser that rounds timestamps to 100 µs still reads a small pass as a step on some frames, so desktop GPUs and browsers keep their lists. Each window is judged afresh. To cost passes on such a GPU, count GPU-bound frames instead: the perf line's `GPU-bound` mean ([The mean frame](#the-mean-frame-and-when-it-is-the-gpus)), or `tools/phone-perf/submits.mjs` at `?scale=1` (#568).
 
 ### From a game
 
@@ -226,7 +382,7 @@ fn pre_update(&mut self, ctx: &mut ExtensionCtx) {
 }
 ```
 
-`set_gpu_timing(device, queue, on)` returns whether timing is on, false where the device can't time. While F2 is open the player times the frame itself, and it stops again when F2 closes, unless the game had already turned it on.
+`renderer.set_gpu_timing(device, queue, on)` returns whether timing is on, false where the device can't time. While F2 is open the player times the frame itself, and it stops again when F2 closes, unless the game had already turned it on.
 
 A host that drives `SceneRenderer` itself can time its own work in the same frame. It scopes it with the timer and ends each frame once:
 
@@ -243,6 +399,44 @@ renderer.finish_gpu_timings(&device, &queue); // after the frame's last timed su
 `begin_submit` and `end_submit` put the timestamps in submissions of their own, for work that makes its own encoders. A frame holds up to 32 scopes; past that, scopes time nothing.
 
 To have the scope show up in a GPU debugger too, open it with `flint_render::gpu_labels::begin(renderer.gpu_timer_mut(), &mut encoder, "My pass")` and close it with `gpu_labels::end`. Each call opens a debug group of the same name (next section) and, when the renderer is timing, the timer's scope inside it. Without timing, they open only the group.
+
+## Comparing two runs
+
+The `[perf]` lines are prose. To ask "did this change make the frame slower" of a script rather than by eye, write the same numbers as data and compare two files (#1093).
+
+`--perf-report <file.json>` beside `--exit-after` writes, when the run ends, what the `[perf]` lines print: the run's frames and mean (`run`), the present-to-present spread (`frame`) and the clock's (`dt`), each as `p50_ms`, `p90_ms`, `p99_ms`, `max_ms`, `mean_ms` and `frames`; the draws; each phase's and script callback's mean and max over every frame after the first 2 s (`cpu`); the GPU's passes as spreads (`gpu`, each pass with the fields `--gpu-time-json` gives it, above); the hitch counts; and the machine: adapter, backend, driver, present mode, window and scene size, render scale, build profile and opt-level, engine commit. The lines are printed from the same numbers the file is written from, so the two can't disagree. A report records every frame, times every script callback and turns GPU timing on where the adapter has it, as `--hitch-log` and `--perf` do, so a run with a report is a run that measures itself a little: compare reports with reports.
+
+```bash
+flint play flint-examples/phase4_runtime.scene.toml --exit-after 12 --perf-report a.json
+```
+
+`scripts/perf-run.sh` is the method below as one command: it runs the release player N times (default 5) with `FLINT_VSYNC=0`, each a fresh process, and keeps the run with the least frame p50, since noise on a busy machine only ever adds time. It writes every run's numbers beside it, so the compare can measure each metric's run-to-run range. Flags after `--` go to the player.
+
+```bash
+bash scripts/perf-run.sh tests/fixtures/scenes/ascii_entities.scene.toml --out base.json -- --width 1280 --height 720
+bash scripts/perf-run.sh tests/fixtures/scenes/ascii_entities.scene.toml --out ascii.json -- --width 1280 --height 720 --style ascii:scope=screen
+python scripts/perf-compare.py base.json ascii.json --metric gpu.frame.p50_ms --metric gpu.passes.ASCII.p50_ms
+```
+
+`scripts/perf-compare.py` prints a row for each metric that changed past the noise floor, and exits 1 when a gated metric (`--metric`, by default `frame.p50_ms`) is worse by more than `--tolerance` (default 10%) and by more than the floor. The run above, on the RTX 4070 laptop (Vulkan, release):
+
+```text
+noise floor: the largest of 5% (--noise), 0.01 ms or one hitch, each metric's run-to-run range
+  metric                               base        new     change        %
+  gpu.frame.p50_ms                    1.096      1.166     +0.071    +6.4%  slower *
+  gpu.passes.Style edges.p50_ms       0.023      0.041     +0.018   +81.8%  slower
+  gpu.passes.ASCII.p50_ms             0.166      0.218     +0.052   +31.5%  slower *
+  ... and 78 within noise or a single worst frame (--all shows them)
+
+ok gpu.frame.p50_ms: slower +6.4%, within the 10% tolerance
+REGRESSION gpu.passes.ASCII.p50_ms: 0.166 -> 0.218 (+31.5%), past the 10% tolerance and the 0.010 noise floor
+```
+
+At 600 fps that scene's frame is the CPU's, so `frame.p50_ms` didn't move (`within noise`): a GPU change is gated on a GPU metric. A whole-screen Kuwahara in the same place took the frame from 1.25 to 3.18 ms p50 and failed the default gate.
+
+**The noise floor** is the largest of `--noise` (5%), 0.01 ms (or one hitch, for a count), each metric's run-to-run range over the quieter half of a set's runs, and the change of `--control <metric>`, a metric the change can't touch (a pass it doesn't draw): a change under it is said `within noise`. The 5% is measured: two sets of five runs of one binary on that scene read frame p50 1.254 and 1.318 ms, 5.1% apart, while each set's quiet runs agreed to 0.04 ms. A set drifts more than a run does, so take the base and the change in turns (base, change, base) when the difference you're after is small. A run whose pick metric reads 1.5x its set's least was disturbed (another build, a sleep): it is left out of every metric and named in a warning. A worst frame (`max_ms`) is one frame, listed only with `--all`. Each value is the least of its set's runs (the most, for fps), metric by metric, as the method below takes the least of five.
+
+It refuses (exit 2) reports whose adapter, backend, resolution or build profile differ, and a player report against a `--gpu-time-json` file, which time different frames; `--force` compares them anyway. It reads `--gpu-time-json` files too, so two headless timings compare the same way (the run above read +6.7% for the frame and +48% for ASCII that way, in a debug build). `--json` prints one document. It is not a CI gate: CI has only WARP, and wall-clock numbers there are noise.
 
 ## Capturing a frame in RenderDoc
 
@@ -323,7 +517,7 @@ Build the player with `--features profile` (a game binary passes it on: `profile
 
 - `tick`, the game's step, with each [phase](#the-perf-line)'s systems beneath it ([#1096](https://github.com/chrischaps/Flint/issues/1096)):
   - input: `poll_devices`, `frame_history`, `input_script`, `collect_game_events`, `advance_transition` (with `scene_transition`, by the scene it goes to, when one runs) and `run_extension_pre_updates`;
-  - scripts: `run_scripts` holds `publish_style_reader` and `script::update`, which holds `script::hot_reload_poll` (`script::poll_scripts`, `script::poll_ui`), `script::discover`, `script::events` and one scope a callback kind (`script::on_init`, `script::on_update`...), each with a `script::call` for each script it calls, named by its file;
+  - scripts: `run_scripts` holds `publish_style_reader` and `script::update`, which holds `script::hot_reload_poll` (`script::poll_scripts`, with its steps `script::poll_take_finished`, `script::poll_failed_at_load`, `script::poll_scan_libs` and `script::poll_each_script`; then `script::poll_ui`), `script::discover`, `script::events` and one scope a callback kind (`script::on_init`, `script::on_update`...), each with a `script::call` for each script it calls, named by its file;
   - physics: `tick_fixed_physics`, with `physics::character` and a `physics::fixed_update` for each fixed step, holding `physics::sync_in`, `physics::step` (Rapier's, its detail the body count) and `physics::sync_out`;
   - script UI: `dispatch_commands`, `call_draw_uis` (`script::on_draw_ui`) and `collect_script_ui` (`script::ui_layout`);
   - anim/fx: `sound` (`audio::decode_queue`, `audio::triggers`, `audio::update` with `audio::sync_sources` and `audio::pan`), `animate` (`animation::update`, a scope for each of its tiers, `animation::sample_and_skin` inside `animation::skeletal`), `upload_bones` and `after_animation` (`publish_bone_probes`, `animation::ik`, `particles::sync`, `particles::simulate`);
@@ -418,17 +612,32 @@ A callback's time names the file, not the cause: a 12 ms `on_update` could be on
 
 - **Engine functions** by name, every overload one record: `clamp()`, `raycast()`. In a trace their calls are **summed**: one bar a function in each scope that called it, laid from the first call for their total, with the count and the longest call in its args (`calls`, `worst_us`). So 400 raycasts in `on_update` are one bar, `raycast() x400` in the flame view, and `flint profile` counts them as 400 calls. The bar may overlap a sibling, since its length is the calls' and not the stretch they ran in. A call that recorded a scope inside it (an engine function with scopes of its own, or one that called back into the script) is a bar of its own instead, so what ran under it stays nested.
 - **The script's own functions** as `<source>:<name>()`: `stall.rhai:hold()`. A function's time includes the engine calls it makes. Every level of a recursion counts as a call, but only the outermost call's time is added, so nothing is counted twice.
-- **Not timed, so their time stays with their caller's:** closures (`|x| x + 1`), functions that read `this`, the callbacks themselves (which have their own scope) and functions of an imported module (`import "menu"`).
+- **An imported module's functions** by the name the import gave: `menu::is_open()` (#1281). A module function calling another of the module's is timed too, a scope inside its caller's. A module is shared by every script that imports it, so while timing is on the engine imports a second, timed copy of it, made the first time a timed call imports it. Making that copy runs the module's top level a second time. A module whose top level only defines constants and functions won't notice; one that logs, plays a sound or draws a `random()` there does it once more when timing first starts.
+- **Closures** by their file and line: `hud.rhai:closure at line 12` (#1281). A closure's time includes what it calls. Two closures on one line are one record. A closure made while timing is on stays timed if a variable keeps it, and it still runs the same after timing is off.
+- **Not timed, so their time stays with their caller's:** functions and closures that read `this`, closures made in a script's or module's top level, and the callbacks themselves (which have their own scope).
 
 `--perf`'s worst-scripts list names each callback's slowest function in one frame of the window: `worst scripts: stall.rhai:on_update 0.33/100.1 (hold() 100.0)`, or `(raycast() x400 3.1)` when it was many calls. A host reads the same numbers from `ScriptSystem::take_function_times()`: one `FnTime` for each callback and function, with `calls`, `total_ms` and `worst_ms`.
 
-**What it costs.** With timing off, a script runs as it did before, and every engine function pays one thread-local flag read. In a release build, a script function call measured 387 to 392 ns with this change and 391 to 398 ns before it, and an engine call 246 to 250 ns against 251 to 256. With timing on, an engine call costs about 45 ns more (two clock reads) and a call of the script's own function about 0.48 µs more. While the recorder records, an engine call costs about 67 ns more, summed into its scope's record. When each call was a scope of its own it was 86 to 92 ns. A script called while timing runs on a copy of its functions in which each `fn f(a, b)` is a small wrapper that opens the timer and then calls the original body, so each call costs a second Rhai call. A helper called 400 times a frame therefore adds about 0.2 ms to that frame while it is timed, and the wrapper's share shows inside the callback's time, not the helper's. The wrapper also takes a call level, so a timed call runs with twice Rhai's call-level limit, and a deep recursion fails at the same depth either way (`cargo test -p flint-script --release --lib fn_call_cost -- --ignored --nocapture` measures it).
+**What it costs.** With timing off, a script runs as it did before, and every engine function pays one thread-local flag read. In a release build, a script function call measured 387 to 392 ns with this change and 391 to 398 ns before it, and an engine call 246 to 250 ns against 251 to 256. With timing on, an engine call costs about 45 ns more (two clock reads) and a call of the script's own function about 0.48 µs more. While the recorder records, an engine call costs about 67 ns more, summed into its scope's record. When each call was a scope of its own it was 86 to 92 ns. A script called while timing runs on a copy of its functions in which each `fn f(a, b)` is a small wrapper that opens the timer and then calls the original body, so each call costs a second Rhai call. A helper called 400 times a frame therefore adds about 0.2 ms to that frame while it is timed, and the wrapper's share shows inside the callback's time, not the helper's. The wrapper also takes a call level, so a timed call runs with twice Rhai's call-level limit, and a deep recursion fails at the same depth either way (`cargo test -p flint-script --release --lib fn_call_cost -- --ignored --nocapture` measures it). A closure's and a module function's calls are wrapped the same way (#1281). With timing off they cost what they did: a closure call measured 369 to 375 ns with this change and 377 to 393 ns before it, and a module function call 566 to 626 ns against 570 to 616. With timing on, a closure call costs about 0.7 to 1.0 µs more and a module function call about 1.1 to 1.3 µs more, because each of a module's calls sets up the module's environment and its wrapper is a second such call.
 
-**What it costs.** Each thread's ring is sized for its seconds at 32 768 scopes a second: 163 840 records, 6.6 MB a thread for the default 5 s, taken at the thread's first scope. A game that records faster grows its ring: each time a lap of the ring spans less than 1.25 times the look-back, it doubles, up to 8 times its first size (1 310 720 records, 52 MB a thread for 5 s). The growth copies the ring on the thread that recorded (6.2 ms for 327 680 to 655 360 records), which the frame notes name as `trace ring` and the hitch detector counts as the tools' cost, not the game's. The header's `ring_grown_to` says how large a ring got. Float, with 16 scripts making about 375 records a frame, holds its 5 s: at 60 fps with vsync the ring never grew (112 266 scopes, 15 MB), and uncapped at 295 fps it grew to the most and held 525 366 scopes. Before engine calls were summed it made about 800 records a frame, and a 5 s trace at 240 fps held 0.85 s of scopes. Recording, a scope costs about 40 ns in a release build ([ADR 0128](https://github.com/chrischaps/Flint/blob/main/docs/adr/0128-one-scope-macro-two-sinks.md)), and the player's own tracks about 0.65 µs a frame. The tavern's 38 scopes a frame come to about 2 µs. A run with and without `--trace` on that scene couldn't tell the two apart: identical runs on a busy machine differed by more (3.6 to 4.5 ms a frame). Saving copies the window on the frame thread, about 1.8 ms for 24 000 scopes in release, then writes the JSON on a thread of its own. The GPU timer `--trace` turns on may cost more than the recorder: `--perf`, which turns on the same timing, read 0.3 to 0.6 ms a frame over plain runs on the tavern at 300 fps, inside that same noise. A default release build has none of it.
+**What it costs.** Each thread's ring is sized for its seconds at 32 768 scopes a second: 163 840 records, 6.6 MB a thread for the default 5 s, taken at the thread's first scope. Beside the records the ring keeps 32 bytes of detail text a record (a script's file, a pass's label), 5.2 MB more, taken at the thread's first scope with text, so a record's text lasts as long as the record does: the oldest frame in a trace still names its scripts. A game that records faster grows its ring: each time a lap of the ring spans less than 1.25 times the look-back, it doubles, up to 8 times its first size (1 310 720 records, 52 MB a thread for 5 s, and 42 MB of text). The growth copies the ring on the thread that recorded (6.2 ms for 327 680 to 655 360 records; the text adds about 1.8 ms, measured in a release test), which the frame notes name as `trace ring` and the hitch detector counts as the tools' cost, not the game's. The header's `ring_grown_to` says how large a ring got. Float, with 16 scripts making about 375 records a frame, holds its 5 s: at 60 fps with vsync the ring never grew (112 266 scopes, 15 MB), and uncapped at 295 fps it grew to the most and held 525 366 scopes. Before engine calls were summed it made about 800 records a frame, and a 5 s trace at 240 fps held 0.85 s of scopes. Recording, a scope costs about 40 ns in a release build ([ADR 0128](https://github.com/chrischaps/Flint/blob/main/docs/adr/0128-one-scope-macro-two-sinks.md)), and the player's own tracks about 0.65 µs a frame. The tavern's 38 scopes a frame come to about 2 µs. A run with and without `--trace` on that scene couldn't tell the two apart: identical runs on a busy machine differed by more (3.6 to 4.5 ms a frame). Saving copies the window's records on the frame thread as they lie in the rings, about 0.35 ms for 90 000 scopes in release (0.7 ms the first time, into fresh memory; it was 3.6 ms when the frame thread named and timed them too), then names and times them and writes the JSON on a thread of its own (about 4 ms for the same 90 000, off the frame). A hitch's trace readies that memory on another thread in the eight frames it waits, and a key's or a capture's trace waits two frames to do the same. The GPU timer `--trace` turns on may cost more than the recorder: `--perf`, which turns on the same timing, read 0.3 to 0.6 ms a frame over plain runs on the tavern at 300 fps, inside that same noise. A default release build has none of it.
 
 **What a trace says about a game.** A trace holds names, never contents: scope names, script paths, asset and scene names, the adapter. That is still a description of a game. Before attaching one to a public issue, check it doesn't name what isn't public yet. `traces/` is in `.gitignore`.
 
-**On the web**, with the recorder in the build, `?perf=1`'s panel has a **Save trace** button that downloads the look-back. The site's release build has no recorder, so the button isn't shown there. In a browser that isn't cross-origin isolated, `performance.now()` is coarsened, so short scopes read as 0 (docs/design/web.md).
+**On the web**, with the recorder in the build, `?perf=1`'s panel has a **Save trace** button that downloads the look-back, the same file the desktop writes, which Perfetto and `flint profile` open. The site's release build has no recorder, so the button isn't shown there. Build one that has it from `crates/flint-player`:
+
+```bash
+trunk build --release --cargo-profile web-release --features trace --dist <dir>
+```
+
+Put a bundle beside its `index.html` and open `?bundle=<pack>&perf=1`. `tools/web-perf/run.mjs --save-trace` presses the button and keeps the file ([its README](https://github.com/chrischaps/Flint/blob/main/tools/web-perf/README.md)).
+
+**Short scopes read as 0 there.** A scope's time is two reads of `performance.now()`, and a browser coarsens that clock on a page that isn't cross-origin isolated, as GitHub Pages pages aren't. Measured on `hitch_metronome` (#1266): in Chrome 158 the clock steps by 100 µs and 88% of a 5 s trace's scopes read 0; in Firefox 160 it steps by 1 ms and 98% read 0. The rest read whole steps. Served cross-origin isolated (`run.mjs --isolate`) the steps are 5 µs and 20 µs, and 53% and 67% still read 0. On such a trace:
+
+- **A scope's mean over many frames holds.** Each read lands on a step at random, so `flint profile top`'s ms a frame came out about the same coarse or isolated (`tick` 0.96 against 0.98 ms in Chrome, `render` 0.34 against 0.35). A frame-sized stall reads as it is.
+- **One frame doesn't.** A single frame's tree, a scope's worst and a scope's self time are made of whole steps: Firefox's coarse trace gave `render` 117 ms of self time where an isolated one gave 11. In Perfetto the zero-length scopes stack into a column of slivers some 25 rows deep where an isolated trace shows the tree's eight.
+
+**What it costs there.** A recorded scope is 122 ns in Chrome and 116 to 136 ns in Firefox, against 30 ns natively in the same bench, nearly all of it the two `performance.now()` calls, each a crossing from wasm into JS. At the web player's ~100 scopes a frame that is about 12 µs a frame. With the recorder compiled in and not recording, a scope is 3 ns. `?scope_bench=1` measures it in any browser: the page times the scopes before it plays, prints the line to the console and leaves the numbers in `window.flintScopeCost` (`run.mjs` keeps them); it then plays without the recorder. ADR 0128 has the table.
 
 ### Reading a trace from the CLI
 
@@ -444,7 +653,7 @@ frame 525 took 107.28 ms (median 4.57): stall.rhai:on_update 100.09 ms against i
   the hitch detector: script stall.rhai:on_update 100.1 ms (judged 108.33 ms against 4.17)
 ```
 
-`explain` holds the slow frame against the trace's normal ones and names the deepest scope that carries its excess, or the phase when no scope does (a wait in `acquire`). On a trace whose ring wrapped, every view reads only the frames the scopes cover and says so under its first line (`scopes cover frames 5729..5932 (0.85 s of 5 s): the main ring wrapped, so the 994 frames before them are left out`): `worst` and `hitch` choose among them, `top`'s ms/frame divides by them, and a frame asked for by number before them is refused with that line. `flint profile frame <trace> hitch` prints that frame's scope tree, `top` the scopes over the whole trace, and `diff <a> <b>` two traces' per-scope means and p90s with the deltas their frames' own spread can explain marked. Each reads only the file, so a trace attached to an issue reads the same anywhere, and each answers `--json`.
+`explain` holds the slow frame against the trace's normal ones and names the deepest scope that carries its excess, or the phase when no scope does (a wait in `acquire`). On a trace whose ring wrapped, every view reads only the frames the scopes cover and says so under its first line (`scopes cover frames 5729..5932 (0.85 s of 5 s): the main ring wrapped, so the 994 frames before them have no scopes`): `worst` and `hitch` choose among them, `top`'s ms/frame divides by them, and a frame asked for by number before them is refused with that line. `flint profile frame <trace> hitch` prints that frame's scope tree, `top` the scopes over the whole trace, and `diff <a> <b>` two traces' per-scope means and p90s with the deltas their frames' own spread can explain marked. Each reads only the file, so a trace attached to an issue reads the same anywhere, and each answers `--json`.
 
 ### The flame view
 
@@ -465,7 +674,7 @@ It opens on the frame the file is about. A capture opens on the frame it holds, 
 - **The flame chart**, in the middle, is the chosen frames as an icicle: first the player's phases, then each thread's scopes nested under their parents, then the script callbacks on a row of their own, then the GPU's passes, laid from the frame's render phase as Perfetto's `gpu` track is. A bar is coloured by the phase it ran inside, in the overlay's colours, so the two tools read alike: scripts orange, physics green, render blue, HUD and present purple. A bar that spans phases, such as `tick`, is grey. The wheel zooms about the pointer and dragging pans. W and S zoom, A and D pan, and F fits the chosen frames again. Hover a bar for its name, detail, time, share of the frame, self time and path. Click it to choose its scope, and double-click it to zoom to it. Hitches run along the ruler's foot, and the frame notes (a model load, a pipeline build) are gold diamonds on it.
 - **The statistics**, on the right, are every scope over the chosen frames: count, total, mean, p90 (by nearest rank) and worst, in ms, each call counted, nested calls included. Click a header to sort, and type to filter. Choosing a scope, here or in the chart, dims every other bar, outlines each of its calls, and plots its time in every frame of the trace under the table and as a white line over the strip. A cost that grows slowly shows as a line that climbs.
 
-**Compare with the median frame** (C, or `--compare`) tints each bar by how much longer its path took in its frame than in the trace's median frame. A path is the scope's thread and the names above it (`tick / run_scripts / script::update / ... / stall.rhai:on_update`), so a name called from two places is compared with itself. A bar that took what it usually takes is greyed. One that took longer turns vermillion, in proportion to how far the whole frame ran over the median. A hitch's cause is then the one red line down the chart, its parents red above it, everything else quiet. It is the picture of what `flint profile explain` prints ([Reading a trace from the CLI](#reading-a-trace-from-the-cli)).
+**Compare with the median frame** (C, or `--compare`) tints each bar by how much longer its path took in its frame than its median over the trace's normal frames, the ones `flint profile explain` holds a frame against (not the first or last, not a hitch, not over twice the median frame). A path is the scope's thread and the names above it (`tick / run_scripts / script::update / ... / stall.rhai:on_update`), a file or label detail splitting a name as `explain` does (`script::call (scripts/stall.rhai)`), so a name called from two places is compared with itself. A bar that took what it usually takes is greyed. One that took longer turns vermillion, in proportion to how far the whole frame ran over the median. A hitch's cause is then the one red line down the chart, its parents red above it, everything else quiet, and the bar at the foot of the line, the deepest that still carries the frame's excess, is ringed in gold: it is the scope `flint profile explain` names ([Reading a trace from the CLI](#reading-a-trace-from-the-cli)), by the same walk over the same medians, and the header names it (`carried by stall.rhai:on_update`). A frame whose excess no scope carries (a wait in `acquire`) has no ring. The tab and `flint profile` read the file with one reader, so they agree on its frames, its `hitch` and where its scopes begin.
 
 ![Compare on the same hitch: tick, run_scripts and script::update down to stall.rhai:on_update in vermillion, the render and present work beside them greyed; the card under the pointer says the stall took 100 ms, 96% of the frame, against 0.032 ms in the median frame](../images/profiler-compare.jpg)
 
@@ -485,7 +694,7 @@ A mean frame time hides uneven frames. `--exit-after N` prints two spreads besid
 [perf] present to present: p50 6.2 p90 29.6 p99 51.7 max 52.1 ms, 226 of 479 over 1.5x p50
 ```
 
-`dt` is what the game steps by. `present to present` is the wall time between one `present()` returning and the next, which is when the swapchain let the CPU through.
+`dt` is what the game steps by. `present to present` is the wall time between one `SurfaceTexture::present()` returning and the next, which is when the swapchain let the CPU through.
 
 With vsync (Fifo), every shown frame stays on screen for a whole number of refreshes. But the CPU can be let through in bursts: on a hybrid-GPU laptop (the dGPU renders and the iGPU drives the panel), frames came 6, 6, 6, then 45 ms apart at a 60 Hz mean. Stepping by those makes each shown frame move 6, 6, 6, then 45 ms of game time, which is judder. So under Fifo the player paces the clock: it passes the window's monitor refresh to `GameClock::set_vsync_period`, and each frame's `delta_time` is a whole number of refresh periods, as many as keep game time on the wall clock and at least one. Game time can run up to 100 ms ahead of the wall clock inside a burst. A stall over 250 ms passes through as one clamped step, as it would unpaced. Frames that come faster on average than that refresh (the wrong monitor, or not really vsynced) fall back to the raw time. `GameClock::raw_delta_time` always has the unpaced wall time.
 
@@ -493,7 +702,7 @@ Switches: `FLINT_PACING=0` turns pacing off, `FLINT_FRAME_LATENCY=1..3` sets the
 
 ### Hitches
 
-A hitch is one frame, and an average hides it. The player keeps its last 600 frames whether or not `--perf` is on: each frame's phases, script times (when they're timed), the clock's raw and paced time, the time from one `present()` to the next, the physics steps that ran and the GPU time. Recording costs about 0.65 µs a frame in an optimized build and allocates nothing once the 600 slots are full.
+A hitch is one frame, and an average hides it. The player keeps its last 600 frames whether or not `--perf` is on: each frame's phases, script times (when they're timed), the clock's raw and paced time, the time from one `SurfaceTexture::present()` to the next, the physics steps that ran and the GPU time. Recording costs about 0.65 µs a frame in an optimized build and allocates nothing once the 600 slots are full.
 
 Each frame is judged as the next one begins. It is a hitch when its time is over both twice the median of the 120 frames before it and that median plus 24 ms. The factor alone would flag a 4 ms frame among 2 ms ones, and the floor alone a 100 ms frame among 70 ms ones.
 
@@ -512,6 +721,15 @@ A hitch is the player's when the player's own work (every phase but `acquire` an
 
 The swapchain has two waits, and neither is the player's. **`acquire`** is the wait for the next image to draw into, taken just before the renderer encodes (#1123). It is where a compositor that holds the presentation engine shows up: on one machine a single acquire took 515 ms while the frame's encoding took under 30. It is also where a full swapchain waits for a free image, under `FLINT_VSYNC=0` or when the GPU is behind, so a GPU-heavy look reads as `elsewhere` there and not as `render`. **`present`** is the wait handing the finished image back. An `elsewhere` hitch names the longer of the two (`elsewhere, acquire 515.6 ms`). Before #1123 the acquire was counted in `render`, so such a frame read as the renderer's work. The counts run over the session and over the frames kept: hitches, hitches a minute, the worst frame, the time since the last hitch and the longest stretch without one.
 
+**A window the OS holds back.** Under vsync, Windows throttles the presents of a window it doesn't show: one behind other windows, or a background job's opened with `--no-activate`. Every frame then stands 250 to 580 ms, nearly all of it in `acquire`, while the player's own work and the GPU's are a few ms each (#1200, an RTX 5070 laptop). Those frames really did stand that long, so the detector judges them as it should, and a 100 ms script stall against a 400 ms median is no hitch: `--capture-on-hitch`, the hitch log and `--max-hitches` find nothing. So the player says when it happens. A frame is **held by the OS** when, under vsync, it stood at least 100 ms and four refreshes, the player's own work was under a quarter of it and the GPU's time, where timed, under half. When at least half the frames after the first 2 s are held (and at least five), the console says so once, and `--exit-after`'s report adds a line under its hitch count:
+
+```text
+[perf] hitches: 0 in 5.0 s after t=2 s
+[perf] frames held by the OS: 12 of 12 after t=2 s, at ~412 ms (the player's work 3.1 ms): the window is hidden or behind others and its presents are throttled, so no hitch can stand out (the hitch log, --capture-on-hitch and --max-hitches see none); FLINT_VSYNC=off measures real frame times
+```
+
+A display that really refreshes slowly (Fifo paced at 7 Hz by a virtual display) stands one refresh a frame and isn't counted, nor is a game whose own work takes the time. To look for hitches in a run whose window won't show, as an agent's `--no-activate` runs on Windows usually are, set `FLINT_VSYNC=off` (or pass `--vsync off`): the frames then take what the work takes, and `--capture-on-hitch=4` caught both of #1200's stalls (101 ms against a 0.65 ms median). A minimised window draws nothing at all, so its run waits until the window comes back.
+
 Whose time it was doesn't say why. Each frame also keeps **notes**: what the engine did on it, said by the code that did it, with how long it took. A hitch keeps the notes of its own frame and of the frame before (the GPU's share of a frame's work lands a frame late), and names them as its likely cause, or says `no engine event`. A transition that loaded a model reads:
 
 ```text
@@ -523,12 +741,12 @@ A note made inside another, such as a model inside a transition or a pipeline in
 
 | Note | When |
 |---|---|
-| `model load` | a glTF file read, decoded and uploaded, at a scene's load or a procgen fallback |
+| `model load` | a glTF file read, decoded and uploaded: at a scene's load, a chunk's (inside its `chunk load`), the end of the frame a script spawned an entity with a model the scene hadn't loaded, or a procgen fallback |
 | `texture load` | a texture file decoded and uploaded the first time its name is asked for |
 | `pipeline build` | a pipeline built, by its label (the scene's at start, a style's on its first draw) |
 | `style build` | a post-process style's passes built, a user style marked so |
 | `scene transition` | a scene left and the next one entered |
-| `chunk load` | a chunk's entities spawned |
+| `chunk load` | a chunk's entities spawned, with their models, colliders and scripts |
 | `script load`, `script reload` | a script compiled at load, or a changed one swapped in |
 | `reload poll` | the hot-reload poll itself, when it took 1 ms or more |
 | `procgen` | procedural assets made at a scene's load or by the frame's queue |
@@ -536,11 +754,15 @@ A note made inside another, such as a model inside a transition or a pipeline in
 | `surface reconfigure` | the window's swapchain made again (a resize) |
 | `physics steps` | a frame that ran more than one fixed step |
 | `clock stall` | a frame over 250 ms, which pacing passed through as it was |
+| `save` | the `persist_*` store written to its save file, by why (`debounce`, `persist_save`, `scene transition`, `exit`) |
 | `screenshot` | a `--screenshot` frame read back and written as a PNG, by its file |
 | `stats overlay` | the HUD pass of the first frame F2 shows a view on (`opened`, `opened (graph)`) |
+| `capture write` | a frame capture's writer thread was encoding and writing while the frame ran, by its folder; untimed, since the frame never waits on it ([Capturing from the running player](#capturing-from-the-running-player)) |
 | `trace ring` | the scope recorder's ring grew to hold its look-back (`main ring grew to 655360 records`; [Recording a trace](#recording-a-trace)) |
 
-The last three are the player's own tools at work. A hitch they account for (their times cover at least half its excess) is the tools' cost, not the game's. It is classed **`tooling`**, named by the tool (`screenshot shots/look_0003.png, 92.5 ms`, `stats overlay opened, 12.0 ms`) and counted apart from the game's hitches: the graph's counters, the perf line, the exit report's counts and every `--max-hitches` gate leave it out, and `--capture-on-hitch` doesn't capture it. A screenshot's read-back and write land in `present`, so before #1129 every `--screenshot-every` frame read as a 60 to 200 ms hitch `elsewhere, present`, which an agent validating with screenshots and the hitch log would take for the compositor.
+`screenshot`, `stats overlay` and `trace ring` are the player's own tools at work. A hitch they account for (their times cover at least half its excess) is the tools' cost, not the game's. It is classed **`tooling`**, named by the tool (`screenshot shots/look_0003.png, 92.5 ms`, `stats overlay opened, 12.0 ms`) and counted apart from the game's hitches: the graph's counters, the perf line, the exit report's counts and every `--max-hitches` gate leave it out, and `--capture-on-hitch` doesn't capture it. A screenshot's read-back and write land in `present`, so before #1129 every `--screenshot-every` frame read as a 60 to 200 ms hitch `elsewhere, present`, which an agent validating with screenshots and the hitch log would take for the compositor.
+
+A tool waits for its own work, so none of its time lands a frame late. A tool's note from the frame before therefore never counts toward the next frame's half (#1274). Before that, a 100 ms script stall on the frame after a screenshot read `screenshot shots/m_0004.png, 74.8 ms (frame before)`: the screenshot was named twice, once for its own hitch and once for a stall it had nothing to do with. A screenshot or a trace ring from the frame before is left out of the cause line, though it is still in the hitch log's `notes`. The F2 overlay is the exception, because its next frames really do draw more HUD than before it opened, and nothing notes that. It is named beside the stall as a hint but never as its cause: `script stall.rhai:on_update 60.0 ms (also: stats overlay 95.0 ms the frame before)`.
 
 A `clock stall` is the long frame itself, so it is kept on the hitch but is no cause. Neither is `physics steps`: extra fixed steps are the clock paying back the game time a long frame before owed, and their own cost is the `physics` phase's, which the hitch names by phase.
 
@@ -550,6 +772,12 @@ The notes are named as a hitch's cause only when their times together cover at l
 scene transition b.scene.toml, 151.2 ms
 sync +9.1 ms (also: reload poll 1.2 ms)
 render +40.0 ms (also: pipeline build 3.0 ms the frame before)
+```
+
+The frame before's notes are there as a guess at work whose GPU share lands late; their own time was the frame before's. So when the hitch's own script took half of its excess, measured inside the frame, they don't count toward the half, and on a loaded machine a slow reload poll the frame before no longer outvotes a script that stalled:
+
+```text
+script stall.rhai:on_update 150.0 ms (also: reload poll 111.7 ms the frame before)
 ```
 
 A note with no time (none of the engine's today) can't be weighed, so it is named. Notes are made only on the player's frame thread and only while the history records. Otherwise each call site costs a flag read, about 1 ns. Collecting a frame's notes costs 2 to 3 ns. The F2 graph and the hitch log are what show them.
@@ -599,6 +827,8 @@ The overlay draws every bar into one mesh, which it keeps and refills from frame
 
 The full overlay's figures include the rendering stats rows. Its first frame costs more, since its text at five sizes is laid out and each glyph drawn once: in a debug build 12 ms on the looks tour and 8 to 44 ms on the metronome, 3.6 ms for the graph alone. That is a debug build with egui's text stack optimized (the root `Cargo.toml`, #1129). Unoptimized it was 108 to 121 ms, a hitch on the graph it had just opened. A first frame that still crosses the threshold is a `tooling` hitch, not the game's. While the graph shows, the history keeps at least four and a half seconds of frames, which at 240 Hz is more than its 600.
 
+The scene viewer's F2 (`flint edit <scene>`) has the same graph and counters above its rendering stats. It times fewer phases, so its bars use four bands: `update` (yellow: the viewer's own frame, from the reload poll and the camera to the particles and the renderer's inputs), `render` (sky blue: the scene drawn and submitted), `egui` (reddish purple: the panels built, tessellated, painted and submitted) and `elsewhere` (grey: the waits for a swapchain image and for present, and what no phase holds). A hitch is the player's rule without its detector: over twice the median of the 120 frames before it and over that median plus 24 ms, judged on vsync-paced time as the player's are. Its line names the phase that grew, `last 120 ms: render +98.0 ms`, or the longer wait, `last 48 ms: elsewhere, acquire 30.1 ms`. The counters count from when F2 opened and, the overlay being as narrow as it was before the graph, leave out the rate a minute, as the player's compact form does. The bar is how long the frame stood on screen and the line says what grew on the CPU, so a reload that took 65 ms more of `update` can stand 50 ms when frames already queued for the display hid part of it. The viewer has no compact form, and with F2 closed it times nothing: its host reads the clock for a phase only while the viewer asks (`Editor::times_frames`).
+
 The history is flint-player's `frame-history` Cargo feature, on by default. A shipped game that wants none of it builds flint-player without it (`default-features = false` and the features it does want). The player then records frames only while `--perf` is on, as it did before, and each call the frame makes costs a branch (measured at nothing beside the `Instant::now` the player takes anyway). `FLINT_FRAME_HISTORY=0` turns the history off in a build that has it, and `FLINT_FRAME_HISTORY=1` turns it on in one that doesn't. `--hitch-log` and `--max-hitches` (next section) turn it on whatever the build says.
 
 ### Finding a hitch
@@ -622,13 +852,13 @@ The perf line's count includes the start's hitches; the exit report below sets t
 | `wall_time` | when it began, seconds since recording began |
 | `ms`, `judged_ms`, `median_ms` | its wall time, the time it was judged by (paced under vsync) and the median it stood out from |
 | `missed_refreshes` | under vsync, the refreshes it ran past its one; `null` without vsync |
-| `class` | `player`, `elsewhere`, or `tooling` (the player's own screenshot or F2 overlay; see the notes above) |
+| `class` | `player`, `elsewhere`, `tooling` (the player's own screenshot or F2 overlay; see the notes above), or `loading` (a scene loaded behind a script's fade; below) |
 | `startup` | it came in the first two seconds of game time |
 | `player_ms` | the player's own work in it, every phase but `acquire` and `present` |
 | `phase`, `phase_ms` | the phase that grew most, and by how much (`player` only) |
 | `script`, `script_ms` | the script callback that took longest (`player` only) |
 | `acquire_ms`, `present_ms` | the swapchain's two waits: for an image, and handing it back (`elsewhere` only) |
-| `gpu_ms` | the GPU's busy time read back in it (a frame or two old), or `null` while the GPU isn't timed: a long `acquire_ms` beside a long `gpu_ms` waited on the GPU, one beside a short `gpu_ms` on the compositor |
+| `gpu_ms` | the GPU's busy time on the hitch frame's own work (its read-back comes a frame or two later, before the line is written), or `null` while the GPU isn't timed: a long `acquire_ms` beside a long `gpu_ms` waited on the GPU, one beside a short `gpu_ms` on the compositor |
 | `cause` | the line the report and the perf line name it by: the engine's notes when they cover half the hitch, else the script, the phase or `elsewhere`, with the notes after it as `(also: ..)` |
 | `notes` | the frame notes of its frame and the frame before, each with `kind`, `detail`, `ms`, `depth` and `frame_before` |
 | `before_ms`, `after_ms` | the eight frames either side, oldest first |
@@ -642,7 +872,7 @@ That is a script that stalls 150 ms at t = 1, 3, 4 and 5 s, on a 240 Hz display 
 ```text
 [perf] hitches: 3 (35.9/min over 5.0 s after t=2 s; 3 player, 0 elsewhere), worst 166.4 ms at t=3.01 s (script stall.rhai:on_update 150.3 ms); causes: 3 script stall.rhai:on_update
 [perf] startup hitches (before t=2 s, not gated): 1, worst 154.4 ms at t=1.01 s (script stall.rhai:on_update 150.2 ms); causes: 1 script stall.rhai:on_update
-[perf] hitch log: hitches.jsonl (4 lines)
+[perf] hitch log: hitches.jsonl (4 lines); sampler marks: ETW provider Flint.Player (89d78a2a-cb1c-507a-4e4b-896621b7b194)
 ```
 
 Hitches in the first two seconds of game time (loading's last uploads, the first pipeline compiles) are counted apart as **startup**. They're the same two seconds the `[perf]` averages leave out. The tools' own hitches get a line of their own when there were any, start or not:
@@ -651,6 +881,14 @@ Hitches in the first two seconds of game time (loading's last uploads, the first
 [perf] tooling hitches (screenshots, the F2 overlay, the trace ring; never gated): 4, worst 219.8 ms at t=9.62 s (screenshot shots/look_0003.png, 192.4 ms); causes: 4 screenshot
 ```
 
+**How loads are counted.** A scene transition takes its whole load in one frame: 40 to 150 ms in a release build, more on a fresh procgen cache. A game that covers it draws a fade during the transition's exiting phase and calls `complete_transition()` once the screen is black, as the showcase's zone doors do after 1.5 s. The load's long frame then stands behind the fade, and the player sees none of it. Such a hitch, on the load's frame or the frame after it (the new scene's first draws, still under the fade), is classed **`loading`**. It keeps its cause, usually `scene transition <scene>, 151.2 ms`, and is logged like any other. It is counted apart from the game's hitches: the graph's count, the perf line, the exit report's counts and `--capture-on-hitch` leave it out, and so do `--max-hitches` and `--max-hitches-startup` unless `--max-hitches-of loading` names it. A chunk loaded or a model built on that frame is part of the same covered frame. The graph's counters add `+N loading` and its last line ends `, behind a cover`. The exit report gives loads a line of their own when there were any. This one is from a scene whose next scene's `on_init` takes 150 ms:
+
+```text
+[perf] loading hitches (scene loads behind a script's cover, not gated): 1, worst 159.6 ms at t=3.05 s (scene transition b.scene.toml, 159.0 ms); causes: 1 scene transition
+```
+
+A transition no script covers is the game's hitch, since the player sees the stall. That is a scene whose scripts never call `complete_transition()`, so the load runs on the next frame, or a fade that hit the ten-second timeout without saying it was drawn. A game that wants its loads gated as gameplay leaves out the cover call, or gates them by name.
+
 **Gate it.** `--max-hitches N` makes the run exit non-zero when it had more than N hitches after the start, the way `--strict-scripts` does for script errors, so a scripted run can fail:
 
 ```sh
@@ -658,9 +896,45 @@ flint-player levels/demo.scene.toml --frame-step 0.0166667 --input-script route.
   --exit-after 30 --hitch-log hitches.jsonl --max-hitches 0
 ```
 
-Startup hitches never count against `--max-hitches`, and `tooling` hitches count against no gate, so a run validated with `--screenshot-every` isn't failed by its own screenshots. `--max-hitches-startup N` gives them a limit of their own. `--max-hitches-of player` counts only the engine's own work, and `--max-hitches-of elsewhere` only the time spent outside it. The failure line's worst hitch and causes are that class's too. A hitch fix is then provable: the same input script, fewer lines. `flint play` takes the same four flags. The gate reads the wall clock, so a machine busy with other work hitches too. Keep it out of CI, and gate `player` hitches when the machine is shared. Pass `--no-hot-reload` to a gated run as to any capture: in a debug build the reload poll can itself take 14 ms, which the log names as `reload poll`. A debug build's own spikes can still cross the 24 ms floor. `FLINT_HITCH_FLOOR_MS` raises it for a gate.
+Startup hitches never count against `--max-hitches`, and `tooling` hitches count against no gate, so a run validated with `--screenshot-every` isn't failed by its own screenshots. `--max-hitches-startup N` gives them a limit of their own. `--max-hitches-of player` counts only the engine's own work, `--max-hitches-of elsewhere` only the time spent outside it, and `--max-hitches-of loading` only the scene loads drawn behind a fade, which the other three leave out. The failure line's worst hitch and causes are that class's too. A hitch fix is then provable: the same input script, fewer lines. `flint play` takes the same four flags. The gate reads the wall clock, so a machine busy with other work hitches too. Keep it out of CI, and gate `player` hitches when the machine is shared. Pass `--no-hot-reload` to a gated run as to any capture: in a debug build the reload poll can itself take 14 ms, which the log names as `reload poll`. A debug build's own spikes can still cross the 24 ms floor. `FLINT_HITCH_FLOOR_MS` raises it for a gate.
 
 **Look inside it.** The log says which phase and which script, and what the engine was doing. To see what happened inside a slow phase, build with the `profile` feature and open the frame in Tracy (above). To see inside a scope, sample it ([When scopes aren't enough](#when-scopes-arent-enough)).
+
+## Load time
+
+The longest hitch in a game is usually a load: the start-up, a scene transition, a chunk streaming in. `--load-report` (and `--perf`, and the web page's `?perf=1`, which print it to the console) gives each load a table of where its time went:
+
+```bash
+flint play levels/tavern_hub.scene.toml --load-report --exit-after 1
+```
+
+```text
+load (transition) showcase_game/levels/tavern_hub.scene.toml: 1272.5 ms to the first frame
+  stage              ms   share  count
+  procgen        1088.7   85.6%      4
+  scripts          75.3    5.9%     15
+  models           39.0    3.1%      1
+  scene read       26.8    2.1%      1
+  first frame      10.1    0.8%      1
+  on_init           6.2    0.5%      1
+  ...
+  not named        21.8    1.7%
+  slowest:    466.8 ms  procgen asset tavern_wood_plank
+              458.7 ms  procgen asset tavern_stone
+              116.2 ms  procgen asset cracked_plaster
+               39.0 ms  model showcase_game/models/YBotWithIdle.glb
+               26.8 ms  scene read tavern_hub.scene.toml
+```
+
+A start-up runs from the process's start to its first frame on screen. A transition runs from the frame that asked for it to the new scene's first frame, and a chunk from its load to the next frame. The stages are what the engine already notes for hitches ([frame notes](#hitches)): every model, texture, pipeline, style and script load, plus the bring-up's own steps (scene read, window, GPU device, audio device, renderer, HUD, teardown, procgen, physics, audio, animation, particles, `on_init`). The first frame is what ran after the bring-up, less what it built on first sight: a pipeline built on its first draw counts as a pipeline. Each stage counts its own time **less what ran inside it**, so a model's row leaves out its textures and the rows add up to the measured time. What no stage named is a row of its own, `not named`. On the desktop it is usually under 2%. On the web it holds the page's fetches and the device's promise, which nothing times. The slowest list is by each item's whole time, so a model there includes its textures.
+
+`flint render` takes the flag too, for a load with no window: its table runs to the first capture, and `--report json` carries it as `load` (`kind`, `name`, `total_ms`, `stages` of `stage`/`ms`/`count`, `unnamed_ms`, `slowest` of `kind`/`name`/`ms`):
+
+```bash
+flint render levels/tavern_hub.scene.toml -o shot.png --load-report --report json
+```
+
+A headless render loads less than the player. It resolves procgen only for living props, opens no sound device and starts no scripts unless `--scripts` is given. So use it to measure what the renderer loads (models, textures, pipelines), and the player for a game's whole start-up. Time in other threads (a hot reload's compile, the frame-capture writer) never shows in a table: a load report is the frame thread's.
 
 ## When scopes aren't enough
 
@@ -692,7 +966,7 @@ The profile (in the root `Cargo.toml`) is release's code with line tables in eve
 
 It writes `target/profiling/`, beside `target/release/` and sharing nothing with it. A cold build took 3 min 46 s and 2.7 GB on a 24-thread machine. `flint-player.exe` is 73 MB of that and its PDB 187 MB (release's PDB is 30 MB). Delete `target/profiling` when you're done with it.
 
-**Frame pointers** are not a profile setting on stable Cargo, and none of the samplers here needs them. On Windows, every sampler walks the stack from the unwind tables every x64 binary carries: the screenshot below was taken without frame pointers. samply on Linux unwinds from `.eh_frame`, which Rust always emits. `perf record --call-graph fp` is the exception. For it, build on Linux with `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling -p flint-player`. There `.cargo/config.toml` sets no flags for the variable to replace. Changing the variable rebuilds the whole profile.
+**Frame pointers** are not a profile setting on stable Cargo, and none of the samplers here needs them. On Windows, every sampler walks the stack from the unwind tables every x64 binary carries: the screenshot below was taken without frame pointers. samply on Linux unwinds from `.eh_frame`, which Rust always emits: sampling the script stall below on Linux, the plain profiling build's stacks held 35.8 frames and a frame-pointer build's 35.2 (57.6 and 56.9 functions with the inlined ones), so frame pointers bought nothing. `perf record --call-graph fp` is the exception. Without frame pointers its stall stacks stopped 2.3 frames up, inside Rhai's timer, and never reached Flint; with them they held 38.8 and ran up through `flint_script`'s `ScriptEngine::call_updates`. For it, build on Linux with `RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling -p flint-player`. There `.cargo/config.toml` sets no flags for the variable to replace. Changing the variable rebuilds the whole profile.
 
 **A game binary** in its own workspace gets the profile only from its own root `Cargo.toml`. Cargo reads `[profile.*]` only from the root of the workspace it builds, as it does `[patch]` ([Upgrading the Engine](upgrading-the-engine.md#cargo)). Copy the three lines:
 
@@ -709,18 +983,18 @@ Then `cargo build --profile profiling` writes `target/profiling/<your-game>`.
 Windows' samplers read the kernel's sampling events (ETW), and only an Administrator, or a service running as one, can start those. Each sampler finds `flint_player.pdb` beside the exe.
 
 - **Superluminal** (commercial, made for games): launch `target\profiling\flint-player.exe` from it, with the game's folder as the working directory and the scene as the argument. It shows each thread's waits beside its samples, which a CPU sampler alone can't ([below](#lining-a-sample-up-with-a-hitch)).
-- **samply** (free, `cargo install --locked samply`), from an Administrator terminal:
+- **samply** (free, `cargo install --locked samply`), from an Administrator terminal. It records through `xperf.exe`, which comes with the [Windows Performance Toolkit](https://learn.microsoft.com/en-us/windows-hardware/test/wpt/) (in the Windows ADK's installer, uncheck everything else), and says so when it can't find it:
 
   ```powershell
-  samply record target\profiling\flint-player.exe examples\hitch_metronome.scene.toml --exit-after 12 --hitch-log hitches.jsonl
+  samply record target\profiling\flint-player.exe flint-examples\hitch_metronome.scene.toml --exit-after 12 --hitch-log hitches.jsonl
   ```
 
-  When the player exits, samply opens the profile in the [Firefox Profiler](https://profiler.firefox.com) in your browser and serves its symbols from your machine. Started from a terminal that isn't elevated, it printed nothing and waited.
+  When the player exits, samply stops xperf and reads its trace (47 s on a 4-core CI runner, so give it time), writes `profile.json.gz` in the folder it ran in, opens that in the [Firefox Profiler](https://profiler.firefox.com) in your browser, and serves its symbols from your machine until Ctrl+C. `samply load profile.json.gz` opens it again later. Started from a terminal that isn't elevated, samply asks Windows for Administrator for its recording helper, through a UAC prompt, and waits for the answer: in a session where that prompt never reached anyone, it printed nothing and waited.
 - **Without Administrator**, Visual Studio 2022's collector samples, because its service already runs elevated. Any edition works if its profiling tools are installed; replace `Community` in the path with yours. From the project's folder in PowerShell (the `/launchArgs` paths can't hold spaces):
 
   ```powershell
   $vsd = "C:\Program Files\Microsoft Visual Studio\2022\Community\Team Tools\DiagnosticsHub\Collector"
-  & "$vsd\VSDiagnostics.exe" start 7 "/launch:$PWD\target\profiling\flint-player.exe" "/launchArgs:$PWD\examples\hitch_metronome.scene.toml --exit-after 12 --hitch-log $PWD\hitches.jsonl" "/loadConfig:$vsd\AgentConfigs\CpuUsageHigh.json"
+  & "$vsd\VSDiagnostics.exe" start 7 "/launch:$PWD\target\profiling\flint-player.exe" "/launchArgs:$PWD\flint-examples\hitch_metronome.scene.toml --exit-after 12 --hitch-log $PWD\hitches.jsonl" "/loadConfig:$vsd\AgentConfigs\CpuUsageHigh.json"
   # when the player has exited:
   & "$vsd\VSDiagnostics.exe" stop 7 "/output:$PWD\metronome.diagsession"
   & "$vsd\VSDiagnostics.exe" expandDiagSession "$PWD\metronome.diagsession"
@@ -731,29 +1005,72 @@ Windows' samplers read the kernel's sampling events (ETW), and only an Administr
 
 ### On Linux
 
-samply records through perf events, which need `kernel.perf_event_paranoid` at 1 or lower (`sudo sysctl kernel.perf_event_paranoid=1`). samply tells you when it's higher.
+samply records through perf events, which need `kernel.perf_event_paranoid` at 1 or lower (`sudo sysctl kernel.perf_event_paranoid=1`, until the next reboot). samply tells you when it's higher: Ubuntu sets 4, and samply then prints the level, a command that lowers it, and exits.
 
 ```sh
 cargo build --profile profiling -p flint-player
 samply record ./target/profiling/flint-player flint-examples/hitch_metronome.scene.toml --exit-after 12 --hitch-log hitches.jsonl
 ```
 
-`perf record --call-graph dwarf` and [Hotspot](https://github.com/KDAB/hotspot) read the same build.
+As on Windows, samply writes `profile.json.gz` when the player exits, opens it in the Firefox Profiler and serves its symbols until Ctrl+C. Each frame names its function and its file, but from the line tables, which hold no paths: the stall reads `tick`, `run_scripts`, `call_updates`, where Windows reads `flint_player::player_app::PlayerApp::tick()` and `flint_script::engine::ScriptEngine::call_updates()`. Filter on the bare name.
+
+`perf record --call-graph dwarf` recorded this build but didn't read it back. With Ubuntu 24.04's perf 7.0, built with libdw's unwinder, `perf script` named almost none of the player's frames and its stacks stopped after a few. Not one sample showed the stall that `--call-graph fp` found in a fifth of them. The recording itself was sound: `samply import` unwinds the same file, to 15 frames a sample at perf's default 8 KB of stack and to 24 with `--call-graph dwarf,65528` (the most perf copies), as deep as `samply record`. So record with samply, or hand perf's recording to it:
+
+```sh
+perf record -F 199 --call-graph dwarf,65528 -o perf.data ./target/profiling/flint-player flint-examples/hitch_metronome.scene.toml --exit-after 12
+samply import perf.data
+```
+
+[Hotspot](https://github.com/KDAB/hotspot) opens the same `perf.data` with its own parser.
 
 ### Lining a sample up with a hitch
 
-The hitch log's `wall_time` counts from when the player began recording frames, as it starts up, before its window opens and the scene loads. A sampler's timeline counts from when the sampler began recording. The offset between the two changes from run to run. In the run below it was 5.06 s, which took in the collector's own start, the launch and the load. Once you place one hitch, the offset holds for the whole run:
+The hitch log's `wall_time` counts from when the player began recording frames. A sampler's timeline counts from when the sampler began. So `--hitch-log` marks each hitch on the sampler's timeline too, where the sampler records it and on its clock ([#1250](https://github.com/chrischaps/Flint/issues/1250)). You find a hitch there by its name, the way the log describes it:
 
-1. Run with `--hitch-log` under the sampler, as above.
-2. Find a hitch whose shape the sampler shows. A `player` hitch is a stretch of solid CPU on the main thread, as long as its `ms`. In [`flint-examples/hitch_metronome.scene.toml`](https://github.com/chrischaps/flint-examples/blob/main/hitch_metronome.scene.toml), `stall.rhai` holds the frame for 100 ms of solid Rhai every 3 s of game time.
-3. Match the gaps. The log's three script hitches came at `wall_time` 6.122, 9.715 and 13.188 s, 3.59 and 3.47 s apart. The sampler's 100 ms stretches inside `flint_script` came at 11.18, 14.78 and 18.25 s, the same gaps apart. The offset is 11.18 − 6.122 = 5.06 s.
-4. Select from `wall_time` plus the offset, for `ms`: that is the frame. Here that's 11.18 to 11.28 s, the range in the screenshot.
+```text
+hitch 112.7 ms player: script stall.rhai:on_update 100.0 ms (frame 230, wall_time 5.934)
+```
+
+`frame` and `wall_time` are the log line's own fields, so a mark and its line find each other. The exit report's last hitch line says where the marks went:
+
+```text
+[perf] hitch log: /home/runner/work/Flint/Flint/out/hitches.jsonl (3 lines); sampler marks: samply marker file /home/runner/work/Flint/Flint/out/marker-15935.txt
+```
+
+Nothing is marked without `--hitch-log`. With it and no sampler, the player pays once at the start (opening a file, or registering an ETW provider: 92 µs in a debug build) and 5 ns for each hitch ETW drops unheard.
+
+**On Linux**, samply reads the marks from a marker file. The player writes `marker-<pid>.txt` beside the hitch log, one line a hitch, `<start> <end> <name>` in `CLOCK_MONOTONIC` nanoseconds (the clock samply's timeline counts on), and maps the file into memory once so samply sees it. Run the player under samply as above. The marks are on the main thread as spans, each as long as its frame: the **Marker Chart** shows them in place, and the **Marker Table** lists them with their times. Filter either on `hitch`. Selecting a mark selects its frame's samples.
+
+![The Firefox Profiler's marker table for a samply recording of flint-player on Linux, filtered on "hitch": three markers at 5.951, 8.958 and 11.949 s, each about 113 ms long, named "hitch 112.7 ms player: script stall.rhai:on_update 100.0 ms (frame 230, wall_time 5.934)" and the like. Above them, the main thread's CPU track peaks at the same three moments](../images/samply-hitch-marks.png)
+
+*`hitch_metronome.scene.toml` under `samply record` on a Linux CI runner, the three hitch marks in the marker table. The main thread's CPU track above peaks at each.*
+
+![The Firefox Profiler zoomed to 238 ms around one hitch: in the main thread's CPU track, a 100 ms block of solid CPU; in the marker chart below it, a mark named "hitch 117.5 ms player: script stall.rhai:on_update 100.1 ms (frame 165, wall_time 7.126)" starting at the block's left edge](../images/samply-hitch-mark-zoomed.png)
+
+*The same scene on a later run, zoomed to one hitch: the mark starts where the stall's CPU does. Its frame runs on past the stall by the rest of its 117 ms.*
+
+On the first run each mark held its stall: the 100 ms of `stall.rhai`'s samples began 0.27, 0.87 and 1.24 ms after their marks began, and ended 12 to 14 ms before them, the rest of each 113 ms frame. The file's first line marks `wall_time` 0 (`flint wall_time 0`), so any moment of the log, not only a hitch, is that mark plus its `wall_time`. samply reads the file when it writes the profile, from the path the player mapped: keep it until then. `samply record --unlink-aux-files` deletes it afterwards; otherwise it stays beside the log.
+
+**On Windows**, the marks are ETW events from the provider **`Flint.Player`**, GUID `89d78a2a-cb1c-507a-4e4b-896621b7b194` (the name's standard hash, so tools that take a provider's name find it too). A trace session that enables the provider records them on the kernel's clock, beside its samples. `samply record` enables only its own providers, so record with xperf, from the same Windows Performance Toolkit samply records with, as Administrator:
+
+```powershell
+xperf -on PROC_THREAD+LOADER+PROFILE -stackwalk Profile -f kernel.etl -start flint -on 89d78a2a-cb1c-507a-4e4b-896621b7b194 -f user.etl
+target\profiling\flint-player.exe flint-examples\hitch_metronome.scene.toml --exit-after 12 --hitch-log hitches.jsonl
+xperf -stop flint -stop -d trace.etl
+samply import --unknown-event-markers trace.etl
+```
+
+`xperf -stop ... -d` merges the two sessions into `trace.etl`. `samply import --unknown-event-markers` shows each event on the main thread as an instant marker named `Hitch/Info`, its fields as text: `name`, `frame`, `wall_time_us`, `duration_us`, `now_us`, `class` and `cause`. WPA opens the same `trace.etl`, with the events under **Generic Events** (provider `Flint.Player`) beside **CPU Usage (Sampled)**.
+
+An ETW event is stamped when it's written, and the player writes it when it finds the hitch, on the next frame. So the event's own time is the hitch's end plus a moment, and its fields place the hitch exactly: `now_us` is the `wall_time` it was written at, so the hitch began `now_us − wall_time_us` microseconds before the event and lasted `duration_us`. A `WallTimeZero` event at the start carries `now_us` too, for the whole run. On a Windows CI runner, recorded as above and imported with samply, a script hitch's stall samples began 1.05 ms after the start its event gives (0.54 ms on a second run), each event was written 0.02 to 0.09 ms after its hitch ended, and every hitch agreed with `WallTimeZero` to within 0.23 ms.
+
+Visual Studio's collector ([above](#on-windows)) records the kernel's samples only. No configuration we tried had it record a provider beside them, so a trace from it carries no marks. Line one of its traces up with a hitch by its shape: a `player` hitch is a stretch of solid CPU on the main thread, as long as its `ms`, and the log's gaps between hitches are the gaps between those stretches. Once one is placed, the offset holds for the whole run. macOS and the web mark nothing yet.
 
 ![The Firefox Profiler's flame graph of a 100 ms script hitch: under PlayerApp::tick and GameCore::run_scripts, ScriptEngine::call_updates runs Rhai's evaluator down to time_functions::elapsed](../images/samply-script-stall-flame-graph.png)
 
 *The 100 ms script hitch in the profiling build, sampled by Visual Studio's collector and opened with `samply import`. Under `PlayerApp::tick` and `GameCore::run_scripts`, `ScriptEngine::call_updates` runs the script through Rhai's evaluator down to `time_functions::elapsed`: `stall.rhai`'s busy wait, reading the clock. A flame graph's width is time spent, not order.*
 
-**An `elsewhere` hitch shows almost nothing.** A sampler records running threads, and a frame lost to `acquire` is a thread waiting. In the same run, a 515 ms acquire hitch held 5 samples. The question there is what the thread waited on, and that takes a context-switch trace: Superluminal records one by default, and WPA's **CPU Usage (Precise)** reads one from a WPR trace. The hitch log's `gpu_ms` already says whether the wait was for the GPU.
+**An `elsewhere` hitch shows almost nothing.** A sampler records running threads, and a frame lost to `acquire` is a thread waiting. In the run that raised #1250, a 515 ms acquire hitch held 5 samples, so finding it by its samples' shape was impossible. Its mark finds it now, and the question it leaves is what the thread waited on. That takes a context-switch trace: Superluminal records one by default, and WPA's **CPU Usage (Precise)** reads one from a WPR trace. The hitch log's `gpu_ms` already says whether the wait was for the GPU.
 
 ## Further Reading
 

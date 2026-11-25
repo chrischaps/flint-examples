@@ -10,22 +10,26 @@ use crate::PlayerApp;
 
 /// Which hitches a gate counts: the player's own work (a script, physics,
 /// the renderer), time spent elsewhere (the compositor, the driver, the
-/// present wait), or both.
+/// present wait), both, or a scene loaded behind a script's cover (#1125),
+/// which the other three leave out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum HitchClass {
     #[default]
     All,
     Player,
     Elsewhere,
+    Loading,
 }
 
 impl HitchClass {
-    /// The words a report says it with: `` (all), `player `, `elsewhere `.
+    /// The words a report says it with: `` (all), `player `, `elsewhere `,
+    /// `loading `.
     pub(crate) fn words(self) -> &'static str {
         match self {
             HitchClass::All => "",
             HitchClass::Player => "player ",
             HitchClass::Elsewhere => "elsewhere ",
+            HitchClass::Loading => "loading ",
         }
     }
 }
@@ -53,7 +57,10 @@ pub struct HitchArgs {
     /// its frame, game and wall time, ms, the median it stood out from,
     /// missed refreshes, player or elsewhere, the worst phase and script,
     /// the engine's notes and the eight frames either side. Times every
-    /// script callback, as --perf does. Desktop only
+    /// script callback, as --perf does. Each hitch is also marked on a
+    /// sampling profiler's timeline (#1250): samply's marker-<pid>.txt
+    /// beside FILE on Linux, ETW events from the Flint.Player provider on
+    /// Windows. Desktop only
     #[arg(long, value_name = "FILE")]
     pub hitch_log: Option<std::path::PathBuf>,
 
@@ -70,7 +77,9 @@ pub struct HitchArgs {
     pub max_hitches_startup: Option<u64>,
 
     /// Which hitches the limits count: `player` (the engine's own work),
-    /// `elsewhere` (the compositor, the driver, the present wait) or `all`
+    /// `elsewhere` (the compositor, the driver, the present wait), `all`
+    /// (both), or `loading`: a scene loaded behind a script's fade, which
+    /// the others leave out (#1125)
     #[arg(long, value_name = "CLASS", value_enum, default_value_t = HitchClass::All)]
     pub max_hitches_of: HitchClass,
 }
@@ -147,5 +156,8 @@ mod tests {
         assert_eq!(cli.hitches.gate().unwrap().max, None);
         assert_eq!(cli.hitches.gate().unwrap().max_startup, Some(2));
         assert!(Cli::try_parse_from(["x", "--max-hitches-of", "gpu"]).is_err());
+        let cli = Cli::try_parse_from(["x", "--max-hitches", "0", "--max-hitches-of", "loading"])
+            .unwrap();
+        assert_eq!(cli.hitches.gate().unwrap().of, HitchClass::Loading);
     }
 }

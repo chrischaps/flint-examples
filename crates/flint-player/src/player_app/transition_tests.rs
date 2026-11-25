@@ -71,6 +71,7 @@ fn started_in(path: &str) -> PlayerApp {
             dirs: Vec::new(),
             source: SchemaSource::Flags,
             dropped: Vec::new(),
+            packages: None,
         },
     );
     app.enter_scene(SceneEntry::Start)
@@ -203,6 +204,7 @@ fn a_fade_that_never_finishes_is_ended_after_the_timeout() {
         // A HUD that never ends its fade-in
         app.transition_phase = TransitionPhase::Loading {
             target_scene: "hud.scene.toml".into(),
+            covered: false,
         };
         app.advance_transition();
         assert!(matches!(

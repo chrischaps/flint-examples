@@ -93,6 +93,10 @@ impl PlayerApp {
         if let Some(failure) = self.trace_failure() {
             return Some(failure);
         }
+        // `--perf-report` that couldn't be written (#1093)
+        if let Some(failure) = self.perf_report_failure() {
+            return Some(failure);
+        }
         // `--max-hitches` and `--max-hitches-startup` (#1079)
         self.stats.watch.failure()
     }
@@ -110,7 +114,12 @@ impl PlayerApp {
             fullscreen,
             input_config_override,
             scene_input_config,
-            AudioSystem::new(),
+            // Opening the sound device can take a second (#1092)
+            flint_core::load_report::timed(
+                flint_core::load_report::Stage::AudioDevice,
+                String::new,
+                AudioSystem::new,
+            ),
         )
     }
 
@@ -153,7 +162,7 @@ impl PlayerApp {
             frame_pacer: None,
             skeletal_entity_assets: HashMap::new(),
             hud: Default::default(),
-            assets: AssetSources::from_working_dir(),
+            assets: AssetSources::default(),
             focus: Default::default(),
             post: Default::default(),
             audio_vfs_generation: flint_core::vfs::generation(),
@@ -164,6 +173,7 @@ impl PlayerApp {
             outcome: Default::default(),
             #[cfg(test)]
             test_gpu: None,
+            offscreen: None,
             input_layers: InputLayers::new(input_config_override),
             gilrs: None,
             pad_rumble: flint_runtime::PadRumble::new(),
@@ -179,6 +189,7 @@ impl PlayerApp {
             particles_render_enabled: true,
             stats: Default::default(),
             loaded_chunks: HashMap::new(),
+            late_models: Default::default(),
             #[cfg(target_os = "android")]
             android_gamepad: AndroidGamepadTracker::new(),
             #[cfg(target_os = "android")]
@@ -399,22 +410,22 @@ impl PlayerApp {
     /// ([`current_look`](Self::current_look)); a later look, faded or cut,
     /// starts from wherever this fade has reached.
     pub fn fade_to_look(&mut self, look: Option<&str>, seconds: f64) -> Result<(), String> {
-        let base = match &self.scene.post_process {
-            Some(def) => def.clone(),
-            None => flint_scene::PostProcessDef::from_authored(toml::Table::new())
-                .map_err(|e| e.to_string())?,
-        };
-        let def = flint_render::look::resolve_in(&base, look, &self.asset_scope())?;
+        let def = self.look_def(look)?;
         self.scene.post_process = Some(def);
         // A fade's target is the look from its start, for get_look()
         self.publish_look();
         let config = self.scene_post_config();
-        self.style.look_fade = None;
+        let now = self.core.clock.total_time;
+        let running = self.style.look_fade.take();
         let device = self.render_context.as_ref().map(|c| &c.device);
-        #[cfg(test)]
-        let device = device.or(self.test_gpu.map(|g| &g.device));
+        let device = device.or(self.windowless_gpu().map(|g| &g.device));
         if let (Some(renderer), Some(device)) = (self.scene_renderer.as_mut(), device) {
-            let from = renderer.post_process_config().clone();
+            // From the frame as it is now: a fade under way at this moment
+            // of it, not at the last render's (#1157), as a capture lays it
+            let mut from = renderer.post_process_config().clone();
+            if let Some(running) = &running {
+                running.at_time(now).apply(&mut from);
+            }
             // Everything the new look switches on is built now, not on the
             // fade's first frame
             renderer.set_post_process_config(config.clone());
@@ -428,7 +439,11 @@ impl PlayerApp {
                     seconds as f32,
                     &self.core.styles,
                 );
-                self.style.look_fade = Some((fade, look.map(str::to_string)));
+                self.style.look_fade = Some(super::state::LookFadeState {
+                    fade,
+                    look: look.map(str::to_string),
+                    at: now,
+                });
             }
         }
         #[cfg(feature = "debug-hud")]
@@ -436,28 +451,151 @@ impl PlayerApp {
         Ok(())
     }
 
+    /// The scene's `[post_process]` with `look` laid under its keys, as
+    /// [`fade_to_look`](Self::fade_to_look) draws it. From the project the
+    /// scene's entry found, and a preloaded look as read there (#1159): a
+    /// cut asks the disk nothing for either. Asking again (the project's
+    /// `flint.toml` and every folder up to it, then the look's search)
+    /// stalled cuts 190-245 ms on a busy disk, preloaded or not.
+    fn look_def(&self, look: Option<&str>) -> Result<flint_scene::PostProcessDef, String> {
+        let base = match &self.scene.post_process {
+            Some(def) => def.clone(),
+            None => flint_scene::PostProcessDef::from_authored(toml::Table::new())
+                .map_err(|e| e.to_string())?,
+        };
+        flint_render::look::resolve_read(
+            &base,
+            look,
+            &self.kept_asset_scope(),
+            &self.style.preloaded_looks,
+        )
+    }
+
+    /// Build `look`'s styles on worker threads now (#1121), so the
+    /// [`set_look`](Self::set_look) that shows it later costs its frame
+    /// nothing: the first ASCII look stopped the game 1.3 s (Vulkan) to
+    /// 1.7 s (DX12) while its 15 pipelines were built on that frame. The
+    /// look isn't shown and nothing a script reads changes. Returns the
+    /// styles started (none when every one is built or building, or there
+    /// is no renderer yet). A look the search can't find is an error, as
+    /// for `set_look`.
+    pub fn prepare_look(&mut self, look: &str) -> Result<Vec<&'static str>, String> {
+        let def = self.look_def(Some(look))?;
+        let config = self.post_config_of(Some(&def));
+        let device = self.render_context.as_ref().map(|c| &c.device);
+        let device = device.or(self.windowless_gpu().map(|g| &g.device));
+        let (Some(renderer), Some(device)) = (self.scene_renderer.as_mut(), device) else {
+            return Ok(Vec::new());
+        };
+        let started = renderer.prepare_styles(device, &config);
+        if !started.is_empty() {
+            tracing::debug!(
+                target: "player",
+                "prepare_look {look}: building {} ahead",
+                started.join(", ")
+            );
+        }
+        Ok(started)
+    }
+
+    /// Build at the scene's entry, on worker threads, what its later
+    /// frames would otherwise build on the frame that first shows it
+    /// (#1159): the stage draws (blend, reveal, tear) its own styles'
+    /// tables ask for, which no frame draws until a reveal lies between 0
+    /// and 1 (Plaintext's tear stalled 92 ms on it); each look in
+    /// `[post_process] preload_looks`, read once and kept for the cut
+    /// ([`look_def`](Self::look_def)), with every stage draw, since a fade
+    /// to a look blends its styles in; and each style in `preload_styles`
+    /// switched on, with every stage draw, for a script that switches it
+    /// on, tweens its reveal or tears it later (Plaintext's `matrix` and
+    /// `tron`). Nothing is shown and nothing a script reads changes. A look
+    /// the search can't find or a style the registry doesn't hold is
+    /// warned about and skipped. Returns the styles started.
+    pub(super) fn preload_scene_styles(
+        &mut self,
+        renderer: &mut SceneRenderer,
+        device: &wgpu::Device,
+    ) -> Vec<&'static str> {
+        let own = self.scene_post_config();
+        let mut started = renderer.prepare_styles(device, &own);
+        self.style.preloaded_looks.clear();
+        let Some(def) = self.scene.post_process.clone() else {
+            return started;
+        };
+        let every: Vec<&'static str> = renderer.styles().names();
+        let scope = self.kept_asset_scope();
+        for look in &def.preload_looks {
+            // Read once here: the cut to it reads nothing
+            match flint_render::look::find_in(look, &scope) {
+                Ok(found) => {
+                    self.style.preloaded_looks.insert(look.clone(), found);
+                }
+                Err(e) => {
+                    tracing::warn!("preload_looks: {e}");
+                    continue;
+                }
+            }
+            match self.look_def(Some(look)) {
+                Ok(look_def) => {
+                    let config = self.post_config_of(Some(&look_def));
+                    started.extend(renderer.prepare_styles_with(device, &config, &every));
+                }
+                Err(e) => tracing::warn!("preload_looks: {e}"),
+            }
+        }
+        if !def.preload_styles.is_empty() {
+            let mut config = own;
+            let mut named = Vec::new();
+            for name in &def.preload_styles {
+                match renderer.styles().find(name) {
+                    Some(descriptor) => {
+                        config.styles.set_enabled(descriptor.name, true);
+                        named.push(descriptor.name);
+                    }
+                    None => tracing::warn!(
+                        "preload_styles: no style named '{name}' ({})",
+                        renderer.styles().names().join(", ")
+                    ),
+                }
+            }
+            started.extend(renderer.prepare_styles_with(device, &config, &named));
+        }
+        if !started.is_empty() {
+            tracing::debug!(
+                target: "player",
+                "preloading {}",
+                started.join(", ")
+            );
+        }
+        started
+    }
+
     /// Whether a look's cross-fade is under way (#496).
     pub fn look_fading(&self) -> bool {
         self.style.look_fade.is_some()
     }
 
-    /// Move a look's cross-fade on by `dt` seconds of game time and lay it
-    /// on the renderer's config (only what the two looks differ in); at its
-    /// end, fire `look_faded` with `#{ look }` and drop it. Each render
-    /// calls it once, before the scripts' overrides are stamped.
-    pub(super) fn step_look_fade(&mut self, dt: f64) {
-        let (Some((fade, look)), Some(renderer)) =
-            (self.style.look_fade.as_mut(), self.scene_renderer.as_mut())
+    /// Lay a look's cross-fade on the renderer's config as it is at game
+    /// time `now` (only what the two looks differ in): `now - at` seconds
+    /// in, so the frame drawn at the moment a fade is asked is where it
+    /// starts, and a capture at the same game time lays the same values
+    /// (#1157). At its end, fire `look_faded` with `#{ look }` and drop it.
+    /// Each render calls it once with the clock's `total_time`, before the
+    /// scripts' overrides are stamped.
+    pub(super) fn lay_look_fade(&mut self, now: f64) {
+        let (Some(state), Some(renderer)) =
+            (self.style.look_fade.as_ref(), self.scene_renderer.as_mut())
         else {
             return;
         };
-        fade.step(dt as f32);
+        let fade = state.at_time(now);
         let mut config = renderer.post_process_config().clone();
         fade.apply(&mut config);
         renderer.set_post_process_config(config);
         if fade.done() {
+            let look = state.look.clone();
             let mut data = toml::Table::new();
-            data.insert("look".into(), look.clone().unwrap_or_default().into());
+            data.insert("look".into(), look.unwrap_or_default().into());
             self.core.events.push(flint_runtime::GameEvent::Custom {
                 name: super::style_commands::LOOK_FADED.into(),
                 data: toml::Value::Table(data),
@@ -537,11 +675,17 @@ impl PlayerApp {
     /// the scene's own tables keep it, so a file the scene can see that
     /// takes the name over later brings it back.
     pub fn scene_post_config(&self) -> flint_render::PostProcessConfig {
+        self.post_config_of(self.scene.post_process.as_ref())
+    }
+
+    /// [`scene_post_config`](Self::scene_post_config) of `def` in place
+    /// of the scene's: a look about to be shown (#1121).
+    fn post_config_of(
+        &self,
+        def: Option<&flint_scene::PostProcessDef>,
+    ) -> flint_render::PostProcessConfig {
         let styles = &self.core.styles;
-        let mut config = self
-            .scene
-            .post_process
-            .as_ref()
+        let mut config = def
             .map(|def| scene_loading::post_process_config_from_def(def, styles))
             .unwrap_or_default();
         for e in
@@ -602,11 +746,19 @@ impl PlayerApp {
     /// the web the device request runs as a promise and `finish_initialize`
     /// follows when it lands (see `web_startup.rs`).
     pub(super) fn initialize(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
-        let window = self.create_window(event_loop)?;
+        use flint_core::load_report::{self, Stage};
+        let window = load_report::timed(Stage::Window, String::new, || {
+            self.create_window(event_loop)
+        })?;
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let render_context = pollster::block_on(RenderContext::new(window.clone()))
-                .context("Failed to initialize render context")?;
+            let render_context = load_report::timed(Stage::Device, String::new, || {
+                pollster::block_on(RenderContext::with_present(
+                    window.clone(),
+                    crate::present_args::present_options(&self.launch),
+                ))
+            })
+            .context("Failed to initialize render context")?;
             self.finish_initialize(window, render_context)
         }
         #[cfg(target_arch = "wasm32")]
@@ -624,17 +776,27 @@ impl PlayerApp {
         window: Arc<Window>,
         render_context: RenderContext,
     ) -> Result<()> {
+        use flint_core::load_report::{self, Stage};
         self.camera.aspect = render_context.aspect_ratio();
-        let scene_renderer = SceneRenderer::new(
-            &render_context,
-            flint_render::RendererConfig {
-                sample_count: self.launch.msaa_sample_count,
-                ..Default::default()
-            },
-        );
+        let mut scene_renderer = load_report::timed(Stage::Renderer, String::new, || {
+            SceneRenderer::new(
+                &render_context,
+                flint_render::RendererConfig {
+                    sample_count: self.launch.msaa_sample_count,
+                    ..Default::default()
+                },
+            )
+        });
+        // Parts skipped or repeated by label (#1317)
+        if let Some(knobs) = &self.launch.pass_knobs {
+            tracing::info!(target: "player", "pass knobs: {}", knobs.describe());
+            scene_renderer.set_pass_knobs(Some(knobs.clone()));
+        }
 
         // Gamepad backend and the egui overlay
-        self.init_egui(&window, &render_context);
+        load_report::timed(Stage::Hud, String::new, || {
+            self.init_egui(&window, &render_context)
+        });
 
         self.render_context = Some(render_context);
         self.scene_renderer = Some(scene_renderer);

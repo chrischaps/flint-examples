@@ -5,8 +5,10 @@
 // No depth attachment: a fragment tests itself against the scene's
 // single-sample depth (the resolve under MSAA, the scaled depth under a
 // render scale), with a tolerance of its own depth slope. The vertex
-// stages repeat shader.wgsl's and skinned_shader.wgsl's products in the
-// same order, so the depths match wherever the rasterisers agree.
+// stages call the products shader.wgsl and skinned_shader.wgsl call
+// (mesh_vertex.wgsl's `world_of` and `clip_of`, skinning.wgsl's
+// `skin_transform`, #1244; Rust puts both in front of this file inside a
+// mesh block), so the depths match wherever the rasterisers agree.
 //
 // A transparent or a particle in front of a styled entity (glass, fire)
 // unmasks it by its coverage (#290): the veil pass drew that coverage just
@@ -21,17 +23,9 @@
 // it shows only under a shockwave's ring or a flashlight's cone.
 
 // A woozy draw (#215, #737) is masked by the woozy module: wooze_noise.wgsl,
-// then this file with the FLINT_WOOZE line on, then style_mask_wooze.wgsl's
-// vertex stages, which move each vertex as wooze_vertex.wgsl does.
-struct TransformUniforms {
-    view_proj: mat4x4<f32>,
-    model: mat4x4<f32>,
-    model_inv_transpose: mat4x4<f32>,
-    camera_pos: vec3<f32>,
-    _pad: f32,
-    //FLINT_WOOZE wooze: ShallowWooze,
-};
-
+// then this file with mesh_vertex.wgsl's FLINT_WOOZE lines on, then
+// style_mask_wooze.wgsl's vertex stages, which move each vertex as
+// wooze_vertex.wgsl does.
 struct MaskDraw {
     id: u32,
     // How far behind the scene's depth a fragment may be, in depth slopes
@@ -113,7 +107,10 @@ fn written_blend(frag_xy: vec2<f32>, covered: f32) -> u32 {
     return u32(round(blend));
 }
 
-@group(0) @binding(0) var<uniform> transform: TransformUniforms;
+// The lines between FLINT_MESH { and } are a mesh's alone: the billboard
+// module (style_mask_billboard.wgsl, #1011) leaves them out and binds its
+// own groups 0 and 2 in their place. The first block, mesh_vertex.wgsl's
+// transform at group 0 and its products, is put in front by Rust.
 @group(1) @binding(0) var<uniform> draw: MaskDraw;
 @group(1) @binding(1) var scene_depth: texture_depth_2d;
 // The style veil (#290): how much of each pixel transparents and particles
@@ -122,8 +119,10 @@ fn written_blend(frag_xy: vec2<f32>, covered: f32) -> u32 {
 @group(1) @binding(2) var veil: texture_2d<f32>;
 // The frame's screen field (#859), read by a draw whose blend follows it
 @group(1) @binding(4) var<uniform> field: Field;
+//FLINT_MESH {
 // Only the skinned entry point reads it; the static layout leaves it out
 @group(2) @binding(0) var<storage, read> bone_matrices: array<mat4x4<f32>>;
+//FLINT_MESH }
 
 struct StaticVertex {
     @location(0) position: vec3<f32>,
@@ -141,23 +140,18 @@ struct SkinnedVertex {
     @location(5) joint_weights: vec4<f32>,
 };
 
+//FLINT_MESH {
 @vertex
 fn vs_static(in: StaticVertex) -> @builtin(position) vec4<f32> {
-    let world_pos = transform.model * vec4<f32>(in.position, 1.0);
-    return transform.view_proj * world_pos;
+    return clip_of(world_of(vec4<f32>(in.position, 1.0)));
 }
 
 @vertex
 fn vs_skinned(in: SkinnedVertex) -> @builtin(position) vec4<f32> {
-    let j = in.joint_indices;
-    let w = in.joint_weights;
-    let skin = bone_matrices[j.x] * w.x
-             + bone_matrices[j.y] * w.y
-             + bone_matrices[j.z] * w.z
-             + bone_matrices[j.w] * w.w;
-    let world_pos = transform.model * (skin * vec4<f32>(in.position, 1.0));
-    return transform.view_proj * world_pos;
+    let skin = skin_transform(in.joint_indices, in.joint_weights);
+    return clip_of(world_of(skin * vec4<f32>(in.position, 1.0)));
 }
+//FLINT_MESH }
 
 @fragment
 fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec2<u32> {

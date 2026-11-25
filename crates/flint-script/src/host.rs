@@ -80,6 +80,15 @@ pub trait ScriptHost {
     fn set_bus_volume(&mut self, bus: String, volume: f64) {
         self.unsupported("set_bus_volume");
     }
+    /// The player's own volume for a bus, by name, saved between runs
+    /// (#1217).
+    fn set_user_bus_volume(&mut self, bus: String, volume: f64) {
+        self.unsupported("set_user_bus_volume");
+    }
+    /// A mixer bus's own low-pass cutoff, Hz, by the bus's name (#1218).
+    fn set_bus_lowpass(&mut self, bus: String, hz: f64) {
+        self.unsupported("set_bus_lowpass");
+    }
 
     // ── Events and the log ──
     /// A custom event for scripts' `on_event` (and the engine's own, such as
@@ -187,6 +196,10 @@ pub trait ScriptHost {
     fn set_look(&mut self, name: Option<String>, seconds: f64) {
         self.unsupported("set_look");
     }
+    /// `prepare_look(name)` (#1121): build the look's styles ahead.
+    fn prepare_look(&mut self, name: String) {
+        self.unsupported("prepare_look");
+    }
 
     // ── The frame: camera, post-processing, render settings ──
     fn set_camera(&mut self, camera: CameraOverrides) {
@@ -272,6 +285,8 @@ pub fn apply<H: ScriptHost + ?Sized>(host: &mut H, cmd: ScriptCommand) {
         } => host.play_sound_at(handle, name, position, play, distances, rolloff),
         C::StopSound { sound, fade } => host.stop_sound(sound, fade),
         C::SetBusVolume { bus, volume } => host.set_bus_volume(bus, volume),
+        C::SetUserBusVolume { bus, volume } => host.set_user_bus_volume(bus, volume),
+        C::SetBusLowpass { bus, hz } => host.set_bus_lowpass(bus, hz),
         C::SetSoundVolume {
             handle,
             volume,
@@ -339,6 +354,7 @@ pub fn apply<H: ScriptHost + ?Sized>(host: &mut H, cmd: ScriptCommand) {
             seconds,
         } => host.rumble(pad, strength, seconds),
         C::SetLook { name, seconds } => host.set_look(name, seconds),
+        C::PrepareLook { name } => host.prepare_look(name),
         C::SetCamera { camera } => host.set_camera(camera),
         C::SetPostProcess { post } => host.set_post_process(post),
         C::SetRenderMode { mode, params } => host.set_render_mode(mode, params),
@@ -384,6 +400,8 @@ pub fn command_name(cmd: &ScriptCommand) -> Option<&'static str> {
         C::StopSound { .. } => "stop_sound",
         C::SetSoundVolume { .. } => "set_sound_volume",
         C::SetBusVolume { .. } => "set_bus_volume",
+        C::SetUserBusVolume { .. } => "set_user_bus_volume",
+        C::SetBusLowpass { .. } => "set_bus_lowpass",
         C::SetAudioLowpass { .. } => "set_audio_lowpass",
         C::FireEvent { .. } => "fire_event",
         C::Log { .. } => return None,
@@ -408,6 +426,7 @@ pub fn command_name(cmd: &ScriptCommand) -> Option<&'static str> {
         C::ClearPanels => "clear_panels",
         C::Rumble { .. } => "rumble",
         C::SetLook { .. } => "set_look",
+        C::PrepareLook { .. } => "prepare_look",
         C::SetCamera { .. } => "set_camera_*",
         C::SetPostProcess { .. } => "set_post",
         C::SetRenderMode { .. } => "set_render_mode",

@@ -6,21 +6,25 @@
 #                          root list's copy (scripts/clippy-conf.sh --check, #761),
 #                          no FLINT_* read past flint_core::env (#715),
 #                          the tree's shape (#760), no examples folder or
-#                          path to one (scripts/examples-check.sh, #984)
-#                          and its size budget
-#                          (scripts/size-check.py, ADR 0122):
-#                          seconds, no build. `scripts/issue.sh
+#                          path to one (scripts/examples-check.sh, #984),
+#                          its size budget (scripts/size-check.py, ADR 0122),
+#                          the root CLAUDE.md's (scripts/claude-md-check.py,
+#                          #992) and the book's crate table (tools/arch-analyzer
+#                          --check-book): seconds, and one small build (the
+#                          analyzer: 23 s and 126 MB cold, once a worktree). `scripts/issue.sh
 #                          land` runs this (verify= in scripts/issue.conf), and
 #                          so does CI's rustfmt job.
 #   scripts/ci.sh --full   also what CI's clippy and wasm jobs run: native
-#                          `cargo clippy --all-targets`, the book's crate table
-#                          (tools/arch-analyzer --check-book), the book against
+#                          `cargo clippy --all-targets`, the book against
 #                          the script API (`flint script api --check-book`, CI's
 #                          headless job), the book's environment page (`flint env
 #                          --check-book`, the same job), the book's flags, styles and images
 #                          against that `flint` (scripts/docs-check.py, the
-#                          same job) and scripts/wasm-check.sh. Minutes, and
-#                          three builds (the third is the debug `flint` most
+#                          same job), scripts/wasm-check.sh and the package
+#                          matrix (scripts/package-check.sh --build, CI's
+#                          package matrix job, #1336: fifteen `cargo check`s,
+#                          each package alone, all and none). Minutes, and
+#                          four builds (the third is the debug `flint` most
 #                          worktrees have already).
 #
 # Formatting is rustfmt's defaults at edition 2021 (rustfmt.toml). Fix a failure
@@ -42,6 +46,28 @@ bash scripts/adr-check.sh
 
 echo "ci: scripts/clippy-conf.sh --check"
 bash scripts/clippy-conf.sh --check
+
+# The root clippy.toml's rules are denied in every member (#979): each takes the
+# workspace's lints, and none overrides them with a `[lints.*]` of its own, so a
+# new crate can't leave a read past the vfs at a warning or unchecked.
+echo "ci: every member takes [lints] workspace = true"
+members=$(awk '/^members *= *\[/{on=1; next} on && /^\]/{exit} on' Cargo.toml | tr -d '\r' | sed -n 's/^ *"\([^"]*\)".*/\1/p')
+bad_lints=""
+for m in $members; do
+    manifest="$m/Cargo.toml"
+    if ! tr -d '\r' < "$manifest" | awk '/^\[lints\]/{l=1; next} /^\[/{l=0} l && /^workspace *= *true/{ok=1} END{exit !ok}'; then
+        bad_lints="$bad_lints  $manifest: no \`[lints] workspace = true\`"$'\n'
+    fi
+    if tr -d '\r' < "$manifest" | grep -qE '^\[lints\.'; then
+        bad_lints="$bad_lints  $manifest: a \`[lints.*]\` table of its own"$'\n'
+    fi
+done
+if [ -n "$bad_lints" ]; then
+    echo "ci: every workspace member takes the workspace's lints (root Cargo.toml, #979):" >&2
+    printf '%s' "$bad_lints" >&2
+    echo "ci: add \`[lints]\` / \`workspace = true\` to the manifest; a call that means it carries #[allow(clippy::disallowed_methods)] // <reason>" >&2
+    exit 1
+fi
 
 # Every FLINT_* switch is read through its row in flint_core::env (#715), so
 # `flint env` and the book list it and a bad value warns. The table's test
@@ -80,11 +106,20 @@ py=python3
 "$py" --version >/dev/null 2>&1 || py=python
 "$py" scripts/size-check.py
 
+# Every session reads the root CLAUDE.md whole (#992): it went from 18 KB
+# after #755 to 35 KB in two weeks with nothing holding it
+echo "ci: scripts/claude-md-check.py"
+"$py" scripts/claude-md-check.py
+
+# The book's crate table (#764), from every Cargo.toml: a dependency added
+# without `cargo run -p flint-arch-analyzer -- --book` kept CI's crate table
+# job red on main from #853 to #969, failing every PR in between
+echo "ci: flint-arch-analyzer --check-book"
+cargo run --locked -q -p flint-arch-analyzer -- --check-book
+
 if [ "${1:-}" = "--full" ]; then
     echo "ci: cargo clippy --all-targets"
     cargo clippy --all-targets --keep-going
-    echo "ci: flint-arch-analyzer --check-book"
-    cargo run --locked -q -p flint-arch-analyzer -- --check-book
     echo "ci: flint script api --check-book"
     cargo run --locked -q -p flint-cli --bin flint -- script api --check-book
     echo "ci: flint env --check-book"
@@ -96,6 +131,8 @@ if [ "${1:-}" = "--full" ]; then
     "$py" scripts/docs-check.py
     echo "ci: scripts/wasm-check.sh"
     bash scripts/wasm-check.sh
+    echo "ci: scripts/package-check.sh --build"
+    bash scripts/package-check.sh --build
 fi
 
 echo "ci: ok"

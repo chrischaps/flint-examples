@@ -13,7 +13,7 @@ The debug keys are a table (#717): each belongs to an owner (the player, or a sc
 | Key | Action | What it does | Owner, and where it acts |
 |-----|--------|--------------|--------------------------|
 | `F1` | `keys` | This table, over the game | player, always |
-| `F2` | `stats` | The **stats overlay**: the [frame-time graph](profiling.md#the-frame-time-graph) and its hitch counters over the rendering stats; a second press shows the graph alone in a corner, a third closes it | player, always (the scene viewer's F2 shows its rendering stats alone) |
+| `F2` | `stats` | The **stats overlay**: the [frame-time graph](profiling.md#the-frame-time-graph) and its hitch counters over the rendering stats; a second press shows the graph alone in a corner, a third closes it | player, always (and the scene viewer: its F2 has the graph and hitch counters above its rendering stats, with bars split into `update`, `render`, `egui` and `elsewhere`; no compact form) |
 | `Shift+F2` | `capture_frame` | Capture the next frame for the frame debugger: a `.flintframe` folder in `captures/` ([Capturing from the running player](profiling.md#capturing-from-the-running-player)); the note at the top names it | player, always (desktop) |
 | `Shift+F3` | `save_trace` | Save the last seconds of the engine's scopes as a trace in `traces/` ([Recording a trace](profiling.md#recording-a-trace)); the first press starts the recorder when no flag did | player, always, in a build with the recorder (desktop) |
 | `F3` | `panels` | Every scene-component panel the current scene created (ocean, grass, camera, particles, styles, Living Props), a [panel for each component whose schema asks for one](#a-panel-from-a-schema), and every panel a game added | player, always |
@@ -33,6 +33,9 @@ The debug keys are a table (#717): each belongs to an owner (the player, or a sc
 Where its owner isn't, a key is the game's like any other: in a scene with no living props, F5 reaches the game. So does any debug key the game's input config binds, and a press the table does take never reaches the game. Opening any panel releases the cursor; closing the last one recaptures it if the scene has a player entity. When a key has nothing to toggle (no panels in the scene, no renderer, a music session that has ended) the player says so instead: a short note at the top of the window for about two seconds, and the same line in the console (`[debug] F3: no debug panels in this scene`).
 
 The old per-effect function keys (F1 debug-mode cycle, F4 shadows, F5 to F10 per-effect toggles, F12 kuwahara) are gone. Everything they flipped now lives in the Rendering & Effects panel, along with the non-binary parameters those keys could never expose ([ADR 0053](https://github.com/chrischaps/Flint/blob/main/docs/adr/0053-one-rendering-and-effects-menu-on-f4.md), consolidated render debug menu). F5 to F7 came back for Living Props, and F1 for the table of keys.
+
+The editors `flint edit` opens have the same F1 (#1170): the card lists the
+host's F1 and the editor's own keys ([the `edit` command](../cli-reference/overview.md#one-host-the-same-flags)).
 
 A scene subsystem declares its keys in its file (`DEBUG_KEYS` in `crates/flint-player/src/player_app/subsystems/`) and acts on them in `Subsystem::on_debug_key`; the table and F1 pick it up with no other edit.
 
@@ -71,14 +74,14 @@ Before #744 the engine also shipped five panels for one game's components (Float
 A script-driven controller usually wants the same three things on a debug panel: a status line saying what it is doing, a button or two to make it do something now, and a few dials. Say so beside its fields, in the component's schema, and every entity carrying the component gets an F3 panel:
 
 ```toml
-[component.raft_visitor.panel]
-title = "Visitor"                          # optional; the default is "Raft visitor"
+[component.harbour_lantern.panel]
+title = "Lantern"                          # optional; the default is "Harbour lantern"
 
-[component.raft_visitor.fields]
-phase = { type = "f32", default = 0.0, panel = { role = "status", labels = ["Away", "Approaching", "Holding", "Departing"] } }
-day = { type = "f32", default = 0.0, panel = { role = "status", format = "day {:.0}" } }
-trigger_visit = { type = "f32", default = -1.0, panel = { role = "trigger", label = "Visit now" } }
-hold_duration_s = { type = "f32", default = 150.0, min = 1.0, panel = "tune" }
+[component.harbour_lantern.fields]
+phase = { type = "f32", default = 0.0, panel = { role = "status", labels = ["Dark", "Kindling", "Lit", "Guttering"] } }
+night = { type = "f32", default = 0.0, panel = { role = "status", format = "night {:.0}" } }
+trigger_light = { type = "f32", default = -1.0, panel = { role = "trigger", label = "Light now" } }
+burn_duration_s = { type = "f32", default = 150.0, min = 1.0, panel = "tune" }
 ```
 
 A field's `panel` is a role, or a table with a `role` and the keys below. The panel's rows are in the order the fields are written.
@@ -91,7 +94,7 @@ A field's `panel` is a role, or a table with a `role` and the keys below. The pa
 
 | Key | For | Means |
 |-----|-----|-------|
-| `label` | any | What the row is called (default: the field's name, so `hold_duration_s` reads "Hold duration s"). The field's `description` shows on hover |
+| `label` | any | What the row is called (default: the field's name, so `burn_duration_s` reads "Burn duration s"). The field's `description` shows on hover |
 | `labels` | a number | Names for its values 0, 1, 2...: what the status line says, the choices a tune row offers, a trigger's buttons. An empty name is no button |
 | `format` | status | How the value reads: `{}` is the value (its label's name if it has labels), `{:.N}` the number to N places, `{:clock}` hours as `HH:MM` |
 | `scale` | status | The status line shows the value times this (`100` for a percentage) |
@@ -105,6 +108,8 @@ A field's `panel` is a role, or a table with a `role` and the keys below. The pa
 | `press` | trigger | What the button writes, when not `true` or `1` |
 
 `[component.<name>.panel]` holds only `title`, and is optional: a component is on a panel as soon as one field says so. A mistake (a role that is none, a key a field's panel doesn't hold, a `format` with no placeholder) is a `bad-panel` warning from `flint validate` and `flint check` naming the file and the field; that row is left off, and the rest of the schema loads as it did. An engine from before #744 ignores a field's `panel` key, so a game can write its panel lines before it updates its engine (the `[component.<name>.panel]` table it would refuse).
+
+`flint schema <component>` shows what the panel holds without opening F3: a `Panel "<title>":` line under the header naming each role's fields, and `--format json` the whole of it as `panel` ([Schemas as data](../concepts/schemas.md#schemas-as-data)).
 
 The panel is a live view of the component. Each frame it writes what you changed and reads the component back, so a field the script moves (the time of day while it advances) is what the slider shows, and a trigger is one write that the script clears. Reset puts back the tune fields the scene loaded with, and Commit to File writes them into the scene file. When several entities carry the component, each gets a panel, titled with its name.
 

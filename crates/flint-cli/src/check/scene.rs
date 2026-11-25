@@ -121,6 +121,26 @@ impl Memo {
             })
             .0
     }
+
+    /// The styles of every folder that can take a look kept at `home`
+    /// (#1272): `home`'s own first, then each scene folder under it the run
+    /// has loaded. A scene finds a look by walking up, so these are the
+    /// registries of the scenes that can name it.
+    pub(super) fn styles_able_to_take(
+        &mut self,
+        home: &Path,
+    ) -> Vec<&flint_render::stylize::StyleRegistry> {
+        self.styles_for(home);
+        let own = &self.style_dirs[home].0;
+        std::iter::once(own)
+            .chain(
+                self.style_dirs
+                    .iter()
+                    .filter(|(dir, _)| dir.as_path() != home && dir.starts_with(home))
+                    .map(|(_, (styles, _))| styles),
+            )
+            .collect()
+    }
 }
 
 /// What a scene's check found, and the files it reached: the scripts,
@@ -173,14 +193,33 @@ fn check_all(
         .flatten();
     let registry = with_styles.as_ref().unwrap_or(&schemas.registry);
     let mut found = flint_scene::diagnose_all(scene, registry, project);
+    // A component or table of a package `[packages]` leaves out (#1334)
+    if let Some(in_use) = &schemas.dirs.packages {
+        in_use.name_unlisted(&mut found);
+    }
     if with_styles.is_some() {
         say_user_styles_clamp(&mut found, memo.styles_for(scene_dir));
+    }
+    if checks.schema || checks.styles {
+        say_unmasked_user_styles(&mut found, memo.styles_for(scene_dir));
     }
     if strict {
         diagnostic::promote_strict(&mut found);
     }
+    // `diagnose` read and parsed it a moment ago. A typed table that
+    // doesn't fit its type (#1061) refuses the load: the pass named it by
+    // field, and the rest of the scene is checked without it
+    let parsed = vfs::read_to_string(scene).ok().and_then(|text| {
+        let (file, refused) = match SceneFile::parse(&text) {
+            Ok(file) => (file, Vec::new()),
+            Err(_) => SceneFile::parse_refusing(&text)?,
+        };
+        let refused: Vec<&str> = refused.into_iter().map(|(table, _)| table).collect();
+        Some((text, file, refused))
+    });
+    let refused: &[&str] = parsed.as_ref().map_or(&[], |(_, _, refused)| refused);
     if !checks.schema {
-        found.retain(stops_a_load);
+        found.retain(|d| stops_a_load(d) || refuses_a_table(d, refused));
     }
     // This pass's own asset check asks the catalog and the specs first
     if checks.files {
@@ -188,19 +227,18 @@ fn check_all(
     }
     let unreadable = cannot_load(&found);
     let no_parent = found.iter().any(dangling_parent);
+    let refused = !refused.is_empty();
     out.diagnostics.extend(found);
     if unreadable {
         return out;
     }
-    // `diagnose` read and parsed it a moment ago
-    let Ok(text) = vfs::read_to_string(scene) else {
-        return out;
-    };
-    let Ok(file) = toml::from_str::<SceneFile>(&text) else {
+    let Some((text, file, _)) = parsed else {
         return out;
     };
 
     let world = match load_scene_diagnosed(scene, registry) {
+        // Said by field already
+        _ if refused => None,
         Ok((world, _, _)) => Some(world),
         // A parent that isn't there, or loops, has been named with its entity
         Err(_) if no_parent => None,
@@ -252,6 +290,7 @@ fn check_all(
         out.diagnostics.extend(wooze);
         out.diagnostics
             .extend(species(scene, &file, world.as_ref()));
+        out.diagnostics.extend(fields(scene, &file));
     }
     if checks.constraints {
         out.diagnostics.extend(schemas.problems.iter().cloned());
@@ -259,7 +298,14 @@ fn check_all(
             out.diagnostics.extend(constraints(scene, world, schemas));
         }
     }
+    flint_scene::place_table_diagnostics(&text, &mut out.diagnostics);
     out
+}
+
+/// One of the pass's errors in a typed table that refuses the load (#1061):
+/// what stops the load, so it is said in every kind of check.
+fn refuses_a_table(d: &Diagnostic, refused: &[&str]) -> bool {
+    d.is_error() && d.entity.is_none() && d.table.as_deref().is_some_and(|t| refused.contains(&t))
 }
 
 /// The params of every procgen spec a model or texture of the scene is made
@@ -627,7 +673,15 @@ fn styles(
     // The scene's look (#356) must be found and fit under its keys
     if let Some(name) = post.look.clone().filter(|name| !name.trim().is_empty()) {
         post.authored = flint_scene::PostProcessDef::authored_table(text);
-        if let Err(e) = flint_render::look::resolve(&post, Some(&name), scene) {
+        let resolved = flint_render::look::resolve(&post, Some(&name), scene);
+        // Its tables for styles that aren't built in, against the styles
+        // this scene is drawn with (#1272): the load would warn of each
+        if resolved.is_ok() {
+            if let Ok(look) = flint_render::look::find(&name, scene) {
+                found.extend(super::looks::style_diagnostics(&look, &[&styles]));
+            }
+        }
+        if let Err(e) = resolved {
             // A look that isn't found lists where it was looked for
             let (what, tried) = match e.split_once(" Tried:\n") {
                 Some((what, tried)) => (what, tried.lines().map(|l| l.trim().into()).collect()),
@@ -664,6 +718,36 @@ fn say_user_styles_clamp(found: &mut [Diagnostic], styles: &flint_render::styliz
     }
 }
 
+/// A `<name>_style` on an entity, where the user style `name` reads no
+/// mask, is the warning a drawing host gives it (#1320), not an
+/// `unknown-component` error asking for a schema file: the style has no
+/// component, so the table does nothing.
+fn say_unmasked_user_styles(
+    found: &mut [Diagnostic],
+    styles: &flint_render::stylize::StyleRegistry,
+) {
+    for d in found
+        .iter_mut()
+        .filter(|d| d.code == codes::UNKNOWN_COMPONENT)
+    {
+        let Some(component) = d.component.clone() else {
+            continue;
+        };
+        let said = styles
+            .iter()
+            .filter(|s| styles.is_user_style(s.name))
+            .find_map(|s| {
+                flint_render::stylize::component_schema::unmasked_style_component(s, &component)
+            });
+        if let Some(said) = said {
+            let (file, entity) = (d.file.take(), d.entity.take());
+            *d = said;
+            d.file = file;
+            d.entity = entity;
+        }
+    }
+}
+
 /// `registry` with the component schema of each style `styles` holds
 /// whose component it declares open or not at all (#556:
 /// `flint_render::stylize::add_component_schemas`), or `None` when there
@@ -672,6 +756,13 @@ fn with_style_schemas(
     registry: &flint_schema::SchemaRegistry,
     styles: &flint_render::stylize::StyleRegistry,
 ) -> Option<flint_schema::SchemaRegistry> {
+    // With no schema at all the scene pass says so once (`no-schemas`).
+    // The built-in styles' components would make the registry look loaded
+    // and turn every engine table into an `unknown-component` error: an
+    // `--engine none` project failed `flint check` that way (#1228)
+    if registry.component_names().is_empty() && registry.archetype_names().is_empty() {
+        return None;
+    }
     let wanted = styles.iter().filter_map(|d| d.component).any(|component| {
         registry
             .get_component(component)
@@ -739,7 +830,7 @@ fn user_style_diagnostic(message: &str, scene_dir: &Path) -> Diagnostic {
 /// load's hint; serde's `said` is added only when the pass found nothing,
 /// so one mistake is one diagnostic.
 fn refuses_the_load(found: &mut Vec<Diagnostic>, scene: &Path, table: &str, said: &str) {
-    const HINT: &str = "the scene does not load until the table fits";
+    const HINT: &str = flint_scene::REFUSES_THE_LOAD;
     let mut named = false;
     for d in found
         .iter_mut()
@@ -764,11 +855,11 @@ fn refuses_the_load(found: &mut Vec<Diagnostic>, scene: &Path, table: &str, said
 
 /// Every inline `particle_emitter` held to the emitter's own reader, as the
 /// player reads it (#690): a key it doesn't read and a value it can't use
-/// are `bad-emitter` errors at their key. The schema lists fewer keys than
-/// the emitter reads and fewer forms (a curve, a `[min, max]` range, a shape
-/// table have no schema type), so what the schema pass says of this
-/// component's keys and forms (`unknown-field`, `bad-type`,
-/// `bad-enum-value`) is left to the reader, and so is anything at a key the
+/// are `bad-emitter` errors at their key. The schema declares every key the
+/// emitter reads (#1051), its many-form ones (a curve, a `[min, max]`
+/// range, a shape table) as `any`, which only the reader can judge, so what
+/// the schema pass says of this component's keys and forms (`unknown-field`,
+/// `bad-type`, `bad-enum-value`) is left to the reader, and so is anything at a key the
 /// reader found wrong: one mistake is said once, in the emitter's words.
 /// The schema's ranges and the texture's asset check stay.
 fn particle_emitters(scene: &Path, world: &FlintWorld, found: &mut Vec<Diagnostic>) {
@@ -850,6 +941,46 @@ fn wooze(scene: &Path, file: &SceneFile, schemas: &SceneSchemas) -> Vec<Diagnost
         .collect()
 }
 
+/// What's wrong with the fields the scene declares, `[field.<name>]`
+/// (#1014): each key and zone the player would leave out, in the field's
+/// words (the zones' are the wooze field's), placed by field and key
+/// (`weather.keys.wind`) or zone (`weather.zone.storm`). `[table.field]` is
+/// open, so the scene pass says nothing of it and this is the one check.
+fn fields(scene: &Path, file: &SceneFile) -> Vec<Diagnostic> {
+    let Some((_, issues)) = flint_core::field::SceneFields::of_tables(&file.tables) else {
+        return Vec::new();
+    };
+    issues
+        .into_iter()
+        .map(|issue| {
+            // The place is the diagnostic's table and field, so the message
+            // is the issue's alone
+            let place = issue.place();
+            let d = Diagnostic::error(codes::BAD_FIELD, issue.message)
+                .file(scene)
+                .table("field");
+            if place.is_empty() {
+                d
+            } else {
+                d.field(place)
+            }
+        })
+        .collect()
+}
+
+/// The values of a species table the player would leave out.
+#[cfg(feature = "living")]
+fn species_problems(def: &flint_procgen::LivingSpeciesDef) -> Vec<String> {
+    flint_player::species_problems(def)
+}
+
+/// Built without the living package (#1333), whose player grows no props:
+/// only the species no prop grows from are said.
+#[cfg(not(feature = "living"))]
+fn species_problems(_: &flint_procgen::LivingSpeciesDef) -> Vec<String> {
+    Vec::new()
+}
+
 /// What's wrong with the scene's `[living.species.<spec>]` tables (#246): a
 /// value the player would leave out, and a species no living prop in the
 /// scene grows from, which is most likely a misspelt spec name and would
@@ -870,7 +1001,7 @@ fn species(scene: &Path, file: &SceneFile, world: Option<&FlintWorld>) -> Vec<Di
             .iter()
             .filter_map(|entity| {
                 let comps = world.get_components(entity.id)?;
-                comps.get(flint_core::components::LIVING_PROP)?;
+                comps.get(super::LIVING_PROP)?;
                 let asset = comps.get(flint_core::components::MODEL)?.get("asset")?;
                 Some(asset.as_str()?.to_string())
             })
@@ -890,7 +1021,7 @@ fn species(scene: &Path, file: &SceneFile, world: Option<&FlintWorld>) -> Vec<Di
     names.sort_unstable();
     let mut found = Vec::new();
     for name in names {
-        for message in flint_player::species_problems(&living.species[name]) {
+        for message in species_problems(&living.species[name]) {
             found.push(problem(name, message));
         }
         // Which specs grow is the loaded world's to say

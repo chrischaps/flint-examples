@@ -1,10 +1,12 @@
 //! Scene renderer - converts FlintWorld entities to GPU meshes
 
+use crate::gpu_counts::{CountedDevice, CountedQueue};
 mod assets;
 mod binding;
 mod capture;
 mod describe;
 mod draw_list;
+mod draw_times;
 mod draws;
 mod extract;
 mod fog_veil;
@@ -14,6 +16,7 @@ mod grass_ground;
 mod helpers;
 mod lights;
 mod msaa;
+mod overdraw;
 mod panels;
 mod particles;
 mod pipelines;
@@ -32,6 +35,7 @@ pub use binding::{BoundGrass, BoundScene, LoadedTerrain, SceneBinding};
 pub use capture::HeldFrameCapture;
 pub use describe::FrameHost;
 use draw_list::{Blend, Draw, DrawItem, DrawList, Layer, VertexStage};
+pub use draw_times::DrawTimesRead;
 pub(crate) use fog_veil::FOG_VEIL_FORMAT;
 pub use frame::{DrawControls, DrawLimit, FrameInputs, SteppedPass, View2d};
 pub use grass_ground::{load_grass_ground_in, load_scene_grass_ground, LoadedGrassGround};
@@ -61,7 +65,7 @@ use crate::primitives::create_grid_mesh;
 use crate::shadow::{ShadowPass, DEFAULT_SHADOW_RESOLUTION};
 use crate::sprite2d_pipeline::Sprite2dInstanceGpu;
 use crate::texture_cache::TextureCache;
-use crate::wooze_pipeline::{grow_bounds, ShallowWoozeDraw, ShallowWoozeUniforms};
+use crate::wooze_pipeline::{grow_bounds, DriftUniforms, ShallowWoozeDraw, ShallowWoozeUniforms};
 use flint_core::components as comp;
 use flint_core::Transform;
 use flint_ecs::FlintWorld;
@@ -70,7 +74,6 @@ use pipelines::{Present, ScenePipelines};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
 
 /// A scope and the `scene_dir` it was made for.
 type AssetScopeFor = (
@@ -157,8 +160,10 @@ pub(super) fn distance_to_box(p: [f32; 3], min: [f32; 3], max: [f32; 3]) -> f32 
 /// The renderer's distance levers (#56). `lod_scale` multiplies every level
 /// switch distance (below 1 a model drops to its simpler levels sooner);
 /// `draw_distance_scale` multiplies every draw distance (below 1 far things
-/// stop drawing sooner). Both start at 1, or at `FLINT_LOD_SCALE` /
-/// `FLINT_DRAW_DISTANCE_SCALE`, and quality settings change them at runtime.
+/// stop drawing sooner). They are the quality keys `lod_scale` and
+/// `draw_distance_scale` (#1149), which the renderer keeps in its
+/// [`QualitySettings`](crate::QualitySettings): both start at 1, or at
+/// their aliases `FLINT_LOD_SCALE` / `FLINT_DRAW_DISTANCE_SCALE`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LodSettings {
     pub lod_scale: f32,
@@ -177,20 +182,22 @@ impl Default for LodSettings {
 impl LodSettings {
     /// The smallest scale accepted: zero would draw only the last level and
     /// nothing with a draw distance.
-    pub const MIN_SCALE: f32 = 0.05;
+    pub const MIN_SCALE: f32 = flint_core::quality::MIN_DISTANCE_SCALE;
 
-    /// The defaults, overridden by `FLINT_LOD_SCALE` and
-    /// `FLINT_DRAW_DISTANCE_SCALE` when they hold a number.
-    /// A value under [`Self::MIN_SCALE`] warns (the table's minimum).
+    /// The defaults under the aliases `FLINT_LOD_SCALE` and
+    /// `FLINT_DRAW_DISTANCE_SCALE`, as
+    /// [`QualitySettings::from_env`](crate::QualitySettings::from_env) reads
+    /// them. A value under [`Self::MIN_SCALE`] warns (the table's minimum).
     pub fn from_env() -> Self {
-        let mut s = Self::default();
-        if let Some(v) = flint_core::env::LOD_SCALE.f32() {
-            s.lod_scale = v.max(Self::MIN_SCALE);
+        Self::of(&crate::QualitySettings::from_env())
+    }
+
+    /// The levers a quality setting holds.
+    pub fn of(q: &crate::QualitySettings) -> Self {
+        Self {
+            lod_scale: q.lod_scale,
+            draw_distance_scale: q.draw_distance_scale,
         }
-        if let Some(v) = flint_core::env::DRAW_DISTANCE_SCALE.f32() {
-            s.draw_distance_scale = v.max(Self::MIN_SCALE);
-        }
-        s
     }
 }
 
@@ -281,7 +288,7 @@ impl TransformTarget {
     fn write(&self, queue: &wgpu::Queue, arena: &mut TransformArena, uniforms: &TransformUniforms) {
         match self {
             TransformTarget::Own(buffer) => {
-                queue.write_buffer(buffer, 0, bytemuck::bytes_of(uniforms));
+                queue.write_buffer_counted(buffer, 0, bytemuck::bytes_of(uniforms));
             }
             TransformTarget::Slot(slot) => arena.stage(*slot, bytemuck::bytes_of(uniforms)),
         }
@@ -331,7 +338,7 @@ impl MaterialBuffer {
     fn write_flags(&self, queue: &wgpu::Queue, debug_mode: u32, tonemapping: u32) {
         let want = (debug_mode as u64) << 32 | tonemapping as u64;
         if self.flags.swap(want, std::sync::atomic::Ordering::Relaxed) != want {
-            queue.write_buffer(
+            queue.write_buffer_counted(
                 &self.buffer,
                 28,
                 bytemuck::cast_slice(&[debug_mode, tonemapping]),
@@ -528,6 +535,9 @@ pub struct SceneRenderer {
     extract_frame: u64,
     /// Runtime meshes uploaded as ray targets, by name (ADR 0105).
     ray_meshes: HashMap<String, Arc<flint_geometry::ray_mesh::RayMesh>>,
+    /// Bumped whenever a runtime mesh is uploaded, removed, or made or
+    /// unmade a ray target, so a host can tell when to look again (#1222)
+    runtime_mesh_generation: u64,
     /// Where the ray targets stood at the last `update_from_world`.
     ray_scene: Arc<flint_geometry::ray_mesh::RayScene>,
     grid_draw: Option<DrawCall>,
@@ -557,8 +567,6 @@ pub struct SceneRenderer {
     /// The loaded terrain's chunk draws and material (ADR 0118, #736).
     terrain: terrain::TerrainRenderer,
     camera_frustum: Option<crate::frustum::Frustum>,
-    /// Level-of-detail and draw-distance scales (#56)
-    lod_settings: LodSettings,
     /// Draws the last `render_to` set aside by level of detail
     lod_culled: u32,
     /// Grass (ADR 0089, 0092): the compute scatter's and the draw's
@@ -566,12 +574,27 @@ pub struct SceneRenderer {
     grass: grass::GrassRenderer,
     /// Times the frame's phases on the GPU, while timing is on (ADR 0108)
     gpu_timer: Option<crate::gpu_timer::GpuTimer>,
+    /// The process's GPU calls as `frame_submitted` last read them, and
+    /// what the frame it ended made (#1091, `gpu_counts`).
+    gpu_calls_at: crate::gpu_counts::GpuCalls,
+    frame_gpu_calls: crate::gpu_counts::GpuCalls,
+    /// Frames submitted, and of them those that created any GPU object.
+    gpu_frames: (u64, u64),
     /// The frame being described (#1084), only after `describe_next_frame`;
     /// `None` costs a frame nothing (`describe.rs`)
     frame_log: Option<Box<crate::frame_capture::FrameLog>>,
     /// The frame being captured (#1085): its targets' copies so far. `None`
     /// unless `capture_next_frame` asked.
     frame_taps: Option<Box<crate::frame_taps::FrameTaps>>,
+    /// The parts a host skips or repeats by label (#1317,
+    /// `set_pass_knobs`). `None` unless a host asked: a part then asks one
+    /// `Option`.
+    pass_knobs: Option<Box<crate::pass_knobs::KnobRun>>,
+    /// A replay's per-draw GPU times (#1203): nothing unless its draw
+    /// controls name draws to time.
+    draw_times: draw_times::DrawTimes,
+    /// A replay's overdraw view of the scene pass (#1203).
+    overdraw: overdraw::Overdraw,
     /// Comic panels (#880, ADR 0120): the layout and each panel's view
     panel_state: panels::PanelState,
     /// Per-entity styles (#263): who is styled, how far, the mask and
@@ -601,10 +624,10 @@ pub struct SceneRenderer {
     style_dt: f32,
     /// The boil the last `prepare` took (#739), stamped into the config
     /// `encode_to` draws. `None` until a host prepares a frame.
-    frame_boil: Option<flint_wooze::BoilFrame>,
+    frame_boil: Option<flint_core::field_frame::BoilFrame>,
     /// A split view's other side's boil (`prepare_again`), drawn by the
     /// next `encode_again_to` only.
-    again_boil: Option<flint_wooze::BoilFrame>,
+    again_boil: Option<flint_core::field_frame::BoilFrame>,
     // Particles (ADR 0068): their pipeline is in `pipelines`, and what it
     // draws from here, so instances uploaded before an MSAA change still draw.
     particle_buffers: Option<ParticleBuffers>,
@@ -791,6 +814,7 @@ impl SceneRenderer {
             box_mesh_cache: HashMap::new(),
             extract_frame: 0,
             ray_meshes: HashMap::new(),
+            runtime_mesh_generation: 0,
             ray_scene: Arc::default(),
             skinning: Default::default(),
             grid_draw,
@@ -809,11 +833,16 @@ impl SceneRenderer {
             sky,
             terrain: Default::default(),
             camera_frustum: None,
-            lod_settings: LodSettings::from_env(),
             lod_culled: 0,
             gpu_timer: None,
+            gpu_calls_at: crate::gpu_counts::totals(),
+            frame_gpu_calls: Default::default(),
+            gpu_frames: (0, 0),
             frame_log: None,
             frame_taps: None,
+            pass_knobs: None,
+            draw_times: Default::default(),
+            overdraw: Default::default(),
             panel_state: Default::default(),
             style_mask: style_mask::StyleMaskState::new(),
             fog_veil: fog_veil::FogVeilState::default(),
@@ -843,9 +872,15 @@ impl SceneRenderer {
             authored_postprocess: postprocess_config.clone(),
             postprocess_config,
             post_config_generation: next_post_config_generation(),
-            quality: crate::quality::QualitySettings {
-                msaa: sample_count,
-                ..Default::default()
+            // The distance levers start at their environment aliases (#1149)
+            quality: {
+                let lod = LodSettings::from_env();
+                crate::quality::QualitySettings {
+                    msaa: sample_count,
+                    lod_scale: lod.lod_scale,
+                    draw_distance_scale: lod.draw_distance_scale,
+                    ..Default::default()
+                }
             },
             render_scale: 1.0,
             surface_size: size,
@@ -1227,15 +1262,32 @@ impl SceneRenderer {
         self.shadows_enabled() && self.lights.scene_shadows() && self.lights.shadow_spot().is_some()
     }
 
+    /// Whether this frame draws a point light's cube shadow map (#1112), as
+    /// [`Self::spot_shadow_drawn`] says for the spot's: a point light with
+    /// `cast_shadows = true` that gives light is among those uploaded.
+    pub fn point_shadow_drawn(&self) -> bool {
+        self.shadows_enabled()
+            && self.lights.scene_shadows()
+            && self.lights.shadow_point().is_some()
+    }
+
     /// The shadow map layers this frame draws: the cascades if a sun casts,
-    /// and the spot's if a spot does.
+    /// the spot's if a spot does, the point's if a point light does.
     pub fn shadow_layers_drawn(&self) -> u32 {
         let cascades = match &self.shadow_pass {
             Some(sp) if self.shadows_drawn() => sp.cascades() as u32,
             _ => 0,
         };
         let spot = (self.shadow_pass.is_some() && self.spot_shadow_drawn()) as u32;
-        cascades + spot
+        let point = (self.shadow_pass.is_some() && self.point_shadow_drawn()) as u32;
+        cascades + spot + point
+    }
+
+    /// The views the shadow layers are drawn through this frame: one a
+    /// layer, but six for a point light's cube, each a draw of its casters.
+    pub(crate) fn shadow_views_drawn(&self) -> u32 {
+        let point = (self.shadow_pass.is_some() && self.point_shadow_drawn()) as u32;
+        self.shadow_layers_drawn() + 5 * point
     }
 
     /// Current shadow map resolution per cascade
