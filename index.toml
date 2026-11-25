@@ -24,6 +24,13 @@
 #   runtime    scripting, physics, audio, HUD and input
 #   2d         sprites, 2D cameras and 2D collision
 #   film       the showcase film: its set, shot list, score and editor (#722, Flint #1195)
+#
+# An example that needs an engine package beyond the kernel says which, as
+# `packages = ["living"]` (Flint #1336, #1525): a flint built without it,
+# such as the headless one CI builds with --no-default-features, passes
+# over that example by name (a SKIP line) instead of failing its scripts.
+# Living props, the wooze field and their tunes need `living`; a
+# music_session needs `music`, with `rhythm` for a chart.
 
 # --- showcase ---------------------------------------------------------------
 
@@ -302,76 +309,91 @@ purpose = "Styles a game writes itself: WGSL beside a .shader.toml, loaded at ru
 scene = "woozy_grove.scene.toml"
 topic = "living"
 purpose = "A walkable clearing of living trees, a bench and lantern on shallow wooze, and three pockets of different wooze"
+packages = ["living"]
 
 [[example]]
 scene = "woozy_grove_grass.scene.toml"
 topic = "living"
 purpose = "The Woozy Grove grown over with grass, combed by the wooze field's noise each beat"
+packages = ["living"]
 
 [[example]]
 scene = "living_props.scene.toml"
 topic = "living"
 purpose = "Forty living oaks, to check their pose rings stay full"
+packages = ["living"]
 
 [[example]]
 scene = "fog_veil.scene.toml"
 topic = "living"
 purpose = "A living oak's echoes in front of a fogged horizon, to check translucent draws are fogged at their own depth"
+packages = ["living"]
 
 [[example]]
 scene = "living_sweep.scene.toml"
 topic = "living"
 purpose = "Forty living oaks with every knob moving, to check no frame goes without a pose"
+packages = ["living"]
 
 [[example]]
 scene = "living_ease.scene.toml"
 topic = "living"
 purpose = "A held flame whose echoes widen and gather back over two seconds each, through tune_living(map, seconds) (#514)"
+packages = ["living"]
 
 [[example]]
 scene = "living_boil_rate.scene.toml"
 topic = "living"
 purpose = "A held flame whose boil doubles, halves and eases back to its spec's pace, through tune_living's jitter_rate (#529)"
+packages = ["living"]
 
 [[example]]
 scene = "living_compare.scene.toml"
 topic = "living"
 purpose = "One tree under two settings, twice: a spec beside a twin with species values of its own"
+packages = ["living"]
 
 [[example]]
 scene = "noise_trees.scene.toml"
 topic = "living"
 purpose = "A colonized pine and a grammar willow that live by noise poses, beside an oak that regrows (#506)"
+packages = ["living"]
 
 [[example]]
 scene = "drifting_page.scene.toml"
 topic = "living"
 purpose = "A page made only of its writing, whose words drift and reflow along their lines; with --scripts a voice quickens and holds them through tune_living's row_rate (#576)"
+packages = ["living"]
 
 [[example]]
 scene = "soft_form.scene.toml"
 topic = "living"
 purpose = "A pale living form whose silhouette feathers at rest (#582)"
+packages = ["living"]
 
 [[example]]
 scene = "wooze_field.scene.toml"
 topic = "living"
 purpose = "Living oaks through a dreamy sphere and a calm box, with a script changing the step"
+packages = ["living"]
 
 [[example]]
 scene = "wooze_props.scene.toml"
 topic = "living"
 purpose = "A living vine and a beetle on shallow wooze, each beside a still twin, under a living oak"
+packages = ["living"]
 
 [[example]]
 scene = "shallow_wooze.scene.toml"
 topic = "living"
 purpose = "Hand-made and imported props on the wooze field's clock, beside still twins"
+packages = ["living"]
 
 [[example]]
 scene = "shading_boil.scene.toml"
 topic = "living"
 purpose = "A still life whose paint and ink re-decide themselves on the wooze field's beat"
+packages = ["living"]
 
 # --- world ------------------------------------------------------------------
 
@@ -466,6 +488,7 @@ purpose = "Pads lit by audio_position() on a looping click track"
 scene = "music_clock.scene.toml"
 topic = "runtime"
 purpose = "A suite with no chart: two named stems, and pads kept in time by music_beat(), music_bar() and music_section()"
+packages = ["music"]
 
 [[example]]
 scene = "seeded_stars.scene.toml"

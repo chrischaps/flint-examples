@@ -34,7 +34,9 @@ jobs:
 
       # The index matches the folder, and every scene validates: a scene on
       # disk with no entry, an entry with no file, an empty topic or
-      # purpose, or a scene with an error diagnostic fails it.
+      # purpose, or a scene with an error diagnostic fails it. This flint
+      # has no engine package (Flint #1333), so an entry whose `packages`
+      # it lacks is a SKIP line, never loaded (Flint #1525: 16 of 109).
       - name: flint examples --check
         run: engine/target/debug/flint examples --check
 
