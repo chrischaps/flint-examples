@@ -1,6 +1,7 @@
 //! The engine's scene-table schemas (`schemas/scene/*.toml`, #686) against
 //! the structs of this crate that read the tables (`[living]` and `[wooze]`
-//! are held to theirs in flint-procgen, which owns them).
+//! are held to theirs in flint-procgen, which owns them, and `[panels]` to
+//! `PanelLayout` in flint-render's `tests/panels_schema.rs`, #976).
 //!
 //! The schema is what `flint schema`, an editor and `flint validate` go by;
 //! the struct is what runs. A field in one and not the other is a check that
@@ -30,6 +31,7 @@ fn sample(field_type: &FieldType) -> toml::Value {
         FieldType::Fields { fields } => Value::Table(sample_table(fields)),
         FieldType::Enum { values } => values[0].clone().into(),
         FieldType::Array { element } => Value::Array(vec![sample(element)]),
+        FieldType::Any => Value::Float(0.5),
     }
 }
 

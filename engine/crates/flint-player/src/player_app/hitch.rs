@@ -38,6 +38,15 @@
 //! (`HitchCounts::tooling`), so a tool never reports its own cost as the
 //! game's and no gate fails a run for its screenshots.
 //!
+//! A hitch is **loading** when a scene was loaded behind a script's cover
+//! on its frame or the frame before (#1125, `Frame::behind_cover`): the
+//! Exiting fade ended with `complete_transition()`, so the load's long
+//! frame stood under a black screen. It keeps its cause (the player's
+//! work, mostly the transition's notes) and is logged as any hitch, but is
+//! counted apart (`HitchCounts::loading`) and no gate counts it unless
+//! asked (`--max-hitches-of loading`). A transition nothing covers goes
+//! straight through and stays the game's: the player sees it.
+//!
 //! Whose time says nothing of why. A hitch also keeps the frame notes
 //! (#1077, `flint_core::frame_notes`) of its frame and the frame before,
 //! since GPU work lands a frame late: a model loaded, a pipeline built, a
@@ -49,7 +58,7 @@
 
 use super::frame_history::FrameHistory;
 use super::perf::{script_name, Phase};
-use flint_core::frame_notes::FrameNote;
+use flint_core::frame_notes::{FrameNote, NoteKind};
 use std::collections::VecDeque;
 
 /// The frames before a frame it is judged against: two seconds at 60 fps.
@@ -60,6 +69,10 @@ pub(crate) const MEDIAN_FRAMES: usize = 120;
 pub(crate) const WARM_FRAMES: usize = 30;
 /// How many hitches are kept to look back at; the counts go on past them.
 pub(crate) const HITCHES_KEPT: usize = 256;
+/// How many frames after a hitch its GPU time is still looked for on its
+/// record (#1104): a read-back is a frame or two late, and the timer has
+/// three in flight at most.
+pub(crate) const GPU_LATE_FRAMES: u64 = 8;
 /// The share of a hitch's excess the player's work must account for to be
 /// the player's.
 const PLAYER_SHARE: f32 = 0.5;
@@ -167,13 +180,18 @@ pub(crate) struct Hitch {
     pub median_ms: f32,
     /// The player's work in it (every phase but `acquire` and `present`).
     pub player_ms: f32,
-    /// The GPU's busy time read back during it ([`Frame::gpu_ms`]: a frame
-    /// or two old), so a reader can tell a wait on the GPU from one on the
-    /// compositor; `None` while the GPU isn't timed.
+    /// The GPU's busy time on its own work ([`Frame::gpu_ms`]), so a reader
+    /// can tell a wait on the GPU from one on the compositor; `None` while
+    /// the GPU isn't timed. It comes back a frame or two after the hitch is
+    /// judged, and [`HitchDetector::observe`] fills it in then (#1104).
     pub gpu_ms: Option<f32>,
     /// Under vsync, how many refreshes it stood for (1 is on time).
     pub refreshes: Option<u32>,
     pub cause: Cause,
+    /// On a covered scene load's frame or the frame after (#1125): drawn
+    /// under the script's fade, so counted apart as `loading`. Never set
+    /// on a tooling hitch, which is the tools' first.
+    pub loading: bool,
     /// What the engine did in this frame and the one before it (#1077),
     /// this frame's first: the GPU's share of a frame's work lands a
     /// frame late, so a pipeline built or a texture uploaded the frame
@@ -197,6 +215,23 @@ const CAUSES_NAMED: usize = 3;
 
 // Read by the hitch log, the report and the readouts (#1079)
 impl Hitch {
+    /// Whether the player saw it as the game's: not its tools' (#1129),
+    /// not a load behind a cover (#1125). What the counts, rates, clean
+    /// stretches and the gates' default classes hold.
+    pub(crate) fn is_game(&self) -> bool {
+        !self.cause.is_tooling() && !self.loading
+    }
+
+    /// `player`, `elsewhere`, `tooling` or `loading`: the class a log line
+    /// and a tally file it under.
+    pub(crate) fn class(&self) -> &'static str {
+        if self.loading {
+            "loading"
+        } else {
+            self.cause.label()
+        }
+    }
+
     /// The notes that say what the engine was doing: not a clock stall or
     /// the physics steps, which are the long frame itself
     /// ([`NoteKind::is_symptom`](flint_core::frame_notes::NoteKind::is_symptom)).
@@ -204,16 +239,52 @@ impl Hitch {
         self.notes.iter().filter(|n| !n.note.kind.is_symptom())
     }
 
+    /// Whether a frame capture's writer ran on this frame or the one before
+    /// (#1178): `--capture-on-hitch` passes over such a hitch, which may be
+    /// the last capture's own.
+    pub(crate) fn during_capture_write(&self) -> bool {
+        self.notes
+            .iter()
+            .any(|n| n.note.kind == flint_core::frame_notes::NoteKind::CaptureWrite)
+    }
+
     /// The outermost engine events (a transition, not each model it
-    /// loaded), this frame's first, then by time, longest first.
+    /// loaded), this frame's first, then by time, longest first, and the
+    /// ones that can't weigh ([`weighs`]) last. Work on another thread that
+    /// ran through both frames (#1178: one capture's write) is named once,
+    /// as this frame's.
+    ///
+    /// A tool's note from the frame before is left out (#1274): a tool
+    /// waits for its own work (#1129), so none of a screenshot's read-back
+    /// or a trace ring's growth is in this frame, and naming it here named
+    /// a screenshot twice, once for its own hitch and once for a stall the
+    /// frame after. The F2 overlay is kept, though it never weighs: its
+    /// next frames do draw more HUD than before it opened, unnoted, so it
+    /// is the hint beside a stall there (`also: stats overlay ..`).
     fn top_events(&self) -> Vec<&HitchNote> {
-        let mut top: Vec<&HitchNote> = self.engine_events().filter(|n| n.note.depth == 0).collect();
+        let on_this_frame = |n: &HitchNote| {
+            self.notes.iter().any(|o| {
+                !o.frame_before && o.note.kind == n.note.kind && o.note.detail == n.note.detail
+            })
+        };
+        let mut top: Vec<&HitchNote> = self
+            .engine_events()
+            .filter(|n| n.note.depth == 0)
+            .filter(|n| !(n.frame_before && n.note.kind.is_background() && on_this_frame(n)))
+            .filter(|n| {
+                !(n.frame_before
+                    && n.note.kind.is_tooling()
+                    && n.note.kind != NoteKind::StatsOverlay)
+            })
+            .collect();
         top.sort_by(|a, b| {
-            a.frame_before.cmp(&b.frame_before).then(
-                b.note
-                    .ms
-                    .unwrap_or(-1.0)
-                    .total_cmp(&a.note.ms.unwrap_or(-1.0)),
+            weighs(b).cmp(&weighs(a)).then(
+                a.frame_before.cmp(&b.frame_before).then(
+                    b.note
+                        .ms
+                        .unwrap_or(-1.0)
+                        .total_cmp(&a.note.ms.unwrap_or(-1.0)),
+                ),
             )
         });
         top
@@ -229,14 +300,34 @@ impl Hitch {
     /// to be blamed. A 1.2 ms reload poll in a frame 10 ms over doesn't.
     /// A note that wasn't timed can't be weighed, so it is named, as before.
     fn events_explain(&self, top: &[&HitchNote]) -> bool {
+        let top: Vec<&HitchNote> = top.iter().copied().filter(|n| weighs(n)).collect();
         if top.is_empty() {
             return false;
         }
-        if top.iter().any(|n| n.note.ms.is_none()) {
+        // An untimed load explains the hitch; a count (#1091) never does,
+        // and another thread's work beside the frame (#1178: a capture
+        // being written) does unless a script took the time itself
+        let script = self.blamed_script().is_some();
+        if top.iter().any(|n| {
+            n.note.ms.is_none()
+                && !n.note.kind.is_count()
+                && !(script && n.note.kind.is_background())
+        }) {
             return true;
         }
-        let ms: f32 = top.iter().filter_map(|n| n.note.ms).sum();
-        ms >= self.excess_ms() * PLAYER_SHARE
+        // A script that took the share itself, timed inside this frame,
+        // outweighs the frame before's notes (#1194): their time was the
+        // frame before's, and they are here as a guess at its GPU work
+        // landing late. A loaded machine's 112 ms reload poll there named a
+        // 150 ms script stall; this frame's own notes still count.
+        let share = self.excess_ms() * PLAYER_SHARE;
+        let measured = self.blamed_script().is_some_and(|(_, ms)| ms >= share);
+        let ms: f32 = top
+            .iter()
+            .filter(|n| !(measured && n.frame_before))
+            .filter_map(|n| n.note.ms)
+            .sum();
+        ms >= share
     }
 
     /// The engine's events in a line, whether or not they account for the
@@ -378,6 +469,15 @@ impl Hitch {
     }
 }
 
+/// Whether a hitch's note may count toward the half of its excess that
+/// makes the engine's events its cause. A tool's note from the frame
+/// before never does (#1129, #1274): its time was its own frame's, which
+/// had its own `tooling` hitch. [`Hitch::top_events`] sorts these last, so
+/// a hitch its events explain is keyed by one that weighed.
+fn weighs(n: &HitchNote) -> bool {
+    !(n.frame_before && n.note.kind.is_tooling())
+}
+
 /// The first [`CAUSES_NAMED`] notes, each as `name` says, then "N more".
 fn named(top: &[&HitchNote], name: impl Fn(&HitchNote) -> String) -> String {
     let mut line = top
@@ -399,11 +499,15 @@ pub(crate) struct HitchCounts {
     pub frames: u64,
     /// The wall time they cover, seconds.
     pub secs: f64,
-    /// The game's hitches: the player's and elsewhere, not the tools'.
+    /// The game's hitches: the player's and elsewhere, not the tools' nor
+    /// a covered load's.
     pub hitches: u64,
     /// Hitches the player's own tools made ([`Cause::Tooling`]): counted
     /// here, and in nothing else (rates, clean stretches, since last).
     pub tooling: u64,
+    /// Hitches of a scene loaded behind a script's cover ([`Hitch::loading`],
+    /// #1125): counted here, and in nothing else, as the tools' are.
+    pub loading: u64,
     /// The longest judged frame's wall time, ms.
     pub worst_ms: f32,
     /// Seconds from the end of the last hitch to the end of the newest
@@ -472,6 +576,18 @@ impl HitchDetector {
         let Some(newest) = frames.back() else {
             return 0;
         };
+        // A hitch is judged before its GPU time is back: picked up from its
+        // record once it is (#1104)
+        for h in self
+            .hitches
+            .iter_mut()
+            .rev()
+            .take_while(|h| newest.index.saturating_sub(h.index) <= GPU_LATE_FRAMES)
+        {
+            if h.gpu_ms.is_none() {
+                h.gpu_ms = history.frame(h.index).and_then(|f| f.gpu_ms);
+            }
+        }
         if newest.index < self.next {
             return 0;
         }
@@ -522,6 +638,11 @@ impl HitchDetector {
             return false;
         }
         let cause = self.cause(history, at, before, judged - median);
+        // A load behind a cover lands on its frame, and what its first
+        // frames cost (the GPU's share) on the next, still under the fade
+        let covered =
+            frame.behind_cover || at.checked_sub(1).is_some_and(|b| frames[b].behind_cover);
+        let loading = covered && !cause.is_tooling();
         let notes = at
             .checked_sub(1)
             .map(|b| (&frames[b], true))
@@ -547,12 +668,16 @@ impl HitchDetector {
             gpu_ms: frame.gpu_ms,
             refreshes,
             cause,
+            loading,
         };
         let s = &mut self.session;
         if hitch.cause.is_tooling() {
             // The tools' cost: kept for the log and the graph's line, but
             // the game's stretch with no hitch goes on through it
             s.tooling += 1;
+        } else if hitch.loading {
+            // Under the script's fade: the same, the player saw none of it
+            s.loading += 1;
         } else {
             s.hitches += 1;
             s.longest_clean_secs = s.longest_clean_secs.max(hitch.at - clean_from);
@@ -654,9 +779,10 @@ impl HitchDetector {
         c
     }
 
-    /// The newest hitch that was the game's, not its tools'.
+    /// The newest hitch that was the game's, not its tools' nor a covered
+    /// load's.
     pub(crate) fn last_of_game(&self) -> Option<&Hitch> {
-        self.hitches.iter().rev().find(|h| !h.cause.is_tooling())
+        self.hitches.iter().rev().find(|h| h.is_game())
     }
 
     /// The counts over the frames `history` holds now (about the last ten
@@ -691,6 +817,10 @@ impl HitchDetector {
         for h in self.hitches.iter().filter(|h| h.at >= from) {
             if h.cause.is_tooling() {
                 c.tooling += 1;
+                continue;
+            }
+            if h.loading {
+                c.loading += 1;
                 continue;
             }
             c.hitches += 1;
@@ -1139,7 +1269,9 @@ mod tests {
                 history.mark(phase);
             }
             history.fixed_steps(1);
-            history.gpu_ms(None);
+            // The read-back of two frames ago, onto its record
+            let late = history.under_way_index().checked_sub(2);
+            history.gpu_time(late, 1.5);
         };
         // Warm: the ring full and the detector judging.
         for _ in 0..2 * HISTORY_FRAMES {
@@ -1168,7 +1300,7 @@ mod tests {
                 off.mark(phase);
             }
             off.fixed_steps(1);
-            off.gpu_ms(None);
+            off.gpu_time(off.gpu_frame_index(), 1.5);
             std::hint::black_box(&mut off);
         }
         let off_us = began.elapsed().as_secs_f64() * 1e6 / frames as f64;
@@ -1386,6 +1518,27 @@ mod tests {
     /// load of 70 ms in a frame 83 ms over, a transition of 90 ms. A note
     /// of the frame before that doesn't is named after, marked so.
     #[test]
+    fn a_frame_that_made_gpu_objects_is_named_beside_the_cause_never_as_it() {
+        // #1091: an untimed load is named as the cause, but a count of GPU
+        // objects is evidence, not a measured cost
+        use flint_core::frame_notes::{self, NoteKind};
+        frame_notes::listen(true);
+        let mut run = Run::new(None);
+        run.frames(120, steady(HZ60_MS));
+        frame_notes::note(NoteKind::GpuObjects, || "40 bind groups".into(), None);
+        let stall = F {
+            render: 62.0,
+            ..steady(HZ60_MS + 60.0)
+        };
+        assert_eq!(run.frame(stall), 1);
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.cause_line(), "render +60.0 ms (also: gpu objects)");
+        assert_eq!(h.cause_key(), "render");
+        assert_eq!(h.likely_cause(), "gpu objects 40 bind groups");
+        frame_notes::listen(false);
+    }
+
+    #[test]
     fn a_note_that_covers_half_the_hitch_is_its_cause() {
         use flint_core::frame_notes::{self, NoteKind};
         frame_notes::listen(true);
@@ -1440,6 +1593,222 @@ mod tests {
         frame_notes::listen(false);
     }
 
+    /// A capture's writer runs beside the game (#1178): a hitch while it
+    /// writes names the write as its likely cause, the reload poll it slowed
+    /// beside it; a script that took the time itself is still the script's.
+    #[test]
+    fn a_hitch_while_a_capture_writes_names_the_write() {
+        use flint_core::frame_notes::{self, NoteKind};
+        let writing = || {
+            frame_notes::note(
+                NoteKind::CaptureWrite,
+                || "tavern_hub-t5.000.flintframe".into(),
+                None,
+            )
+        };
+        frame_notes::listen(true);
+        let mut run = Run::new(None);
+        run.frames(120, steady(HZ60_MS));
+        writing();
+        frame_notes::note(
+            NoteKind::ReloadPoll,
+            || "15 scripts watched".into(),
+            Some(21.3),
+        );
+        let poll = F {
+            sync: 23.0,
+            ..steady(HZ60_MS + 48.0)
+        };
+        assert_eq!(run.frame(poll), 1);
+        let h = run.detector.last().unwrap();
+        assert_eq!(
+            h.cause_line(),
+            "reload poll 15 scripts watched, 21.3 ms; capture write tavern_hub-t5.000.flintframe"
+        );
+        assert!(h.is_game(), "the game's frame: counted, gated");
+        assert!(h.during_capture_write());
+
+        // The write alone, the frame before: still named
+        run.frames(60, steady(HZ60_MS));
+        writing();
+        run.frame(steady(HZ60_MS));
+        let stall = F {
+            render: 42.0,
+            ..steady(60.0)
+        };
+        assert_eq!(run.frame(stall), 1);
+        let h = run.detector.last().unwrap();
+        assert_eq!(
+            h.cause_line(),
+            "capture write tavern_hub-t5.000.flintframe (frame before)"
+        );
+        assert_eq!(h.cause_key(), "capture write");
+        assert!(h.during_capture_write());
+
+        // One write through both frames is named once, as the hitch's own
+        run.frames(60, steady(HZ60_MS));
+        writing();
+        run.frame(steady(HZ60_MS));
+        writing();
+        assert_eq!(run.frame(stall), 1);
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.cause_line(), "capture write tavern_hub-t5.000.flintframe");
+
+        // A script's own stall stays the script's
+        run.frames(60, steady(HZ60_MS));
+        writing();
+        let slow = F {
+            scripts: 41.0,
+            ..steady(60.0)
+        };
+        assert_eq!(
+            run.frame_scripts(slow, &[("scripts/whale.rhai:on_update", 40.0)]),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(
+            h.cause_line(),
+            "script whale.rhai:on_update 40.0 ms (also: capture write)"
+        );
+        assert_eq!(h.cause_key(), "script whale.rhai:on_update");
+
+        // No writer, no note
+        run.frames(60, steady(HZ60_MS));
+        assert_eq!(run.frame(stall), 1);
+        assert!(!run.detector.last().unwrap().during_capture_write());
+        frame_notes::listen(false);
+    }
+
+    /// #1194, from `hitch_log_tests` on a busy machine: a script that
+    /// stalled 150 ms, with a hot-reload poll slow enough to be noted on
+    /// its frame and the frame before. Together they are 6 ms of a hitch
+    /// 150 ms over: the script's, the polls named after it.
+    /// `"cause":"reload poll 1 scripts watched, 2.8 ms; reload poll 1
+    /// scripts watched, 3.4 ms (frame before)"`
+    #[test]
+    fn a_script_stall_is_not_blamed_on_the_reload_polls_beside_it() {
+        use flint_core::frame_notes::{self, NoteKind};
+        let poll = |ms: f32| {
+            frame_notes::note(
+                NoteKind::ReloadPoll,
+                || "1 scripts watched".into(),
+                Some(ms),
+            )
+        };
+        frame_notes::listen(true);
+        let mut run = Run::new(None);
+        run.frames(120, steady(HZ60_MS));
+        poll(3.4);
+        run.frame(steady(HZ60_MS));
+        poll(2.8);
+        let stall = F {
+            scripts: 151.0,
+            ..steady(HZ60_MS + 150.0)
+        };
+        assert_eq!(
+            run.frame_scripts(stall, &[("scripts/stall.rhai:on_update", 150.0)]),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(
+            h.cause_line(),
+            "script stall.rhai:on_update 150.0 ms \
+             (also: reload poll 2.8 ms; reload poll 3.4 ms the frame before)"
+        );
+        assert_eq!(h.cause_key(), "script stall.rhai:on_update");
+        // The notes in a line, as the issue saw them, for whoever asks
+        assert_eq!(
+            h.likely_cause(),
+            "reload poll 1 scripts watched, 2.8 ms; \
+             reload poll 1 scripts watched, 3.4 ms (frame before)"
+        );
+
+        // A loaded machine (40 of `hitch_log_tests` at once): the poll took
+        // 111.7 ms on the frame before, its own hitch. Over half this
+        // frame's excess, but the frame before's time: the script's 150 ms
+        // were measured in this one.
+        run.frames(120, steady(HZ60_MS));
+        poll(111.7);
+        let slow_poll = F {
+            scripts: 112.7,
+            ..steady(HZ60_MS + 111.7)
+        };
+        run.frame_scripts(slow_poll, &[("[hot reload]", 111.7)]);
+        assert_eq!(
+            run.frame_scripts(stall, &[("scripts/stall.rhai:on_update", 150.0)]),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(
+            h.cause_line(),
+            "script stall.rhai:on_update 150.0 ms \
+             (also: reload poll 111.7 ms the frame before)"
+        );
+        assert_eq!(h.cause_key(), "script stall.rhai:on_update");
+
+        // This frame's own note that covers the share is still the cause,
+        // script or no script: a model the script loaded inside its call
+        run.frames(120, steady(HZ60_MS));
+        frame_notes::note(
+            NoteKind::ModelLoad,
+            || "models/crate.glb".into(),
+            Some(140.0),
+        );
+        assert_eq!(
+            run.frame_scripts(stall, &[("scripts/stall.rhai:on_update", 150.0)]),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.cause_line(), "model load models/crate.glb, 140.0 ms");
+        frame_notes::listen(false);
+    }
+
+    /// #1214, the line as a busy machine wrote it on 2026-11-17, before
+    /// #1124's share rule: a 150 ms script stall named for two reload polls
+    /// of 11.4 and 10.4 ms, 22 ms of a hitch 150 ms over (15%, under the
+    /// half a note must cover). The polls were the disk walk #1122 took out
+    /// of every frame (0.2 ms quiet, 1-26 ms on a busy disk).
+    /// `"cause":"reload poll 1 scripts watched, 11.4 ms; reload poll 1
+    /// scripts watched, 10.4 ms (frame before)"`
+    #[test]
+    fn a_script_stall_is_not_blamed_on_two_ten_ms_reload_polls() {
+        use flint_core::frame_notes::{self, NoteKind};
+        let poll = |ms: f32| {
+            frame_notes::note(
+                NoteKind::ReloadPoll,
+                || "1 scripts watched".into(),
+                Some(ms),
+            )
+        };
+        frame_notes::listen(true);
+        let mut run = Run::new(None);
+        run.frames(120, steady(HZ60_MS));
+        poll(10.4);
+        run.frame(steady(HZ60_MS + 10.4));
+        poll(11.4);
+        let stall = F {
+            scripts: 150.11 + 11.4,
+            ..steady(HZ60_MS + 150.11 + 11.4)
+        };
+        assert_eq!(
+            run.frame_scripts(stall, &[("scripts/stall.rhai:on_update", 150.11)]),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(
+            h.cause_line(),
+            "script stall.rhai:on_update 150.1 ms \
+             (also: reload poll 11.4 ms; reload poll 10.4 ms the frame before)"
+        );
+        assert_eq!(h.cause_key(), "script stall.rhai:on_update");
+        assert_eq!(
+            h.likely_cause(),
+            "reload poll 1 scripts watched, 11.4 ms; \
+             reload poll 1 scripts watched, 10.4 ms (frame before)"
+        );
+        frame_notes::listen(false);
+    }
+
     #[test]
     fn the_tables_defaults_are_the_thresholds() {
         // `flint env` says what an unset switch means; it must be true
@@ -1469,6 +1838,52 @@ mod tests {
         assert_eq!(run.frame(slow), 0, "the capture's own frame");
         assert_eq!(run.frame(slow), 1, "the same frame uncaptured is a hitch");
         assert_eq!(run.detector.session().hitches, 1);
+    }
+
+    /// #1125: a scene loaded behind a script's fade is judged and kept as
+    /// a hitch (its cause still the player's), but counted as `loading`,
+    /// and so is the frame after it; the next stall is the game's again.
+    #[test]
+    fn a_load_behind_a_cover_is_loading_and_the_frame_after_it_too() {
+        let mut run = Run::new(None);
+        for _ in 0..60 {
+            run.frame(steady(HZ60_MS));
+        }
+        let load = F {
+            input: 150.0,
+            ..steady(160.0)
+        };
+        run.history.loading_behind_cover();
+        assert_eq!(run.frame(load), 1);
+        let h = run.detector.last().unwrap().clone();
+        assert!(h.loading);
+        assert!(!h.is_game());
+        assert_eq!(h.class(), "loading");
+        assert_eq!(h.cause.label(), "player", "whose work it was is kept");
+        // Its first frame of drawing, still under the fade
+        let first_draw = F {
+            render: 90.0,
+            ..steady(100.0)
+        };
+        assert_eq!(run.frame(first_draw), 1);
+        assert!(run.detector.last().unwrap().loading);
+        for _ in 0..30 {
+            run.frame(steady(HZ60_MS));
+        }
+        // The same stall with no cover: the player sees it
+        assert_eq!(run.frame(load), 1);
+        let h = run.detector.last().unwrap();
+        assert!(!h.loading && h.is_game());
+        assert_eq!(h.class(), "player");
+
+        let s = run.detector.session();
+        assert_eq!((s.hitches, s.loading, s.tooling), (1, 2, 0));
+        let w = run.detector.window(&run.history);
+        assert_eq!((w.hitches, w.loading), (1, 2));
+        assert_eq!(
+            run.detector.last_of_game().map(|h| h.index),
+            run.detector.last().map(|h| h.index)
+        );
     }
 
     /// A screenshot's read-back lands in `present`, so its frame would read
@@ -1554,6 +1969,163 @@ mod tests {
         assert_eq!(h.cause_line(), "stats overlay opened, 95.0 ms");
         assert_eq!(run.detector.session().hitches, 1, "not the game's");
         assert_eq!(run.detector.session().tooling, 1);
+        frame_notes::listen(false);
+    }
+
+    /// #1274, `hitch_metronome` with a screenshot every 2 s: the one at
+    /// t = 6.0 s landed on the frame before the 6 s stall. The screenshot
+    /// got its own `tooling` hitch; the stall after it named the
+    /// screenshot again, for 74.8 ms of a 104 ms excess it never touched.
+    /// `{"frame":1355,"ms":77.96,"class":"tooling","cause":"screenshot
+    /// .../m_0004.png, 74.8 ms"}`
+    /// `{"frame":1356,"ms":107.08,"class":"player","phase":"scripts",
+    /// "phase_ms":100.2,"script":"stall.rhai:on_update","script_ms":100.11,
+    /// "cause":"screenshot .../m_0004.png, 74.8 ms (frame before)"}`
+    #[test]
+    fn a_script_stall_after_a_screenshot_names_the_script() {
+        use flint_core::frame_notes::{self, NoteKind};
+        frame_notes::listen(true);
+        let mut run = Run::new(None);
+        run.frames(240, steady(HZ240_MS));
+        frame_notes::note(
+            NoteKind::Screenshot,
+            || "shots/m_0004.png".into(),
+            Some(74.79),
+        );
+        let shot = F {
+            present: 75.0,
+            ..steady(77.96)
+        };
+        assert_eq!(run.frame(shot), 1);
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.cause_line(), "screenshot shots/m_0004.png, 74.8 ms");
+
+        let stall = F {
+            scripts: 100.2,
+            steps: 4,
+            ..steady(107.08)
+        };
+        assert_eq!(
+            run.frame_scripts(stall, &[("scripts/stall.rhai:on_update", 100.11)]),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.class(), "player");
+        assert_eq!(h.cause_line(), "script stall.rhai:on_update 100.1 ms");
+        assert_eq!(h.cause_key(), "script stall.rhai:on_update");
+        // The screenshot is still on the hitch's notes, for the log
+        assert!(h
+            .notes
+            .iter()
+            .any(|n| n.frame_before && n.note.kind == NoteKind::Screenshot));
+        assert_eq!(run.detector.session().hitches, 1);
+        assert_eq!(run.detector.session().tooling, 1);
+        frame_notes::listen(false);
+    }
+
+    /// #1274's seam without a script to outweigh it (#1194 covers a script
+    /// timed inside the frame): a render stall the frame after a
+    /// screenshot. The screenshot waited for its own read-back, so none of
+    /// its 74.8 ms is in this frame: the render's, named alone.
+    #[test]
+    fn a_render_stall_after_a_screenshot_is_the_renders() {
+        use flint_core::frame_notes::{self, NoteKind};
+        frame_notes::listen(true);
+        let mut run = Run::new(None);
+        run.frames(240, steady(HZ240_MS));
+        frame_notes::note(
+            NoteKind::Screenshot,
+            || "shots/m_0004.png".into(),
+            Some(74.79),
+        );
+        run.frame(F {
+            present: 75.0,
+            ..steady(77.96)
+        });
+        // A pipeline the frame before built on the CPU still weighs, as its
+        // GPU time can land here (#1124); a tool's never does
+        assert_eq!(
+            run.frame(F {
+                render: 60.0,
+                ..steady(64.0)
+            }),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.cause_line(), "render +58.0 ms");
+        assert_eq!(h.cause_key(), "render");
+        assert_eq!(h.likely_cause(), NO_ENGINE_EVENT);
+
+        // The trace recorder's ring grown on the frame before: the same
+        run.frames(240, steady(HZ240_MS));
+        frame_notes::note(NoteKind::TraceRing, || "main".into(), Some(70.0));
+        run.frame(F {
+            render: 72.0,
+            ..steady(75.0)
+        });
+        run.frame(F {
+            render: 60.0,
+            ..steady(64.0)
+        });
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.cause_line(), "render +58.0 ms");
+
+        // With a real note beside it, the real note is the cause and the
+        // tool is left out of the line
+        run.frames(240, steady(HZ240_MS));
+        frame_notes::note(NoteKind::PipelineBuild, || "pbr".into(), Some(40.0));
+        frame_notes::note(
+            NoteKind::Screenshot,
+            || "shots/m_0005.png".into(),
+            Some(74.79),
+        );
+        run.frame(F {
+            present: 75.0,
+            render: 42.0,
+            ..steady(120.0)
+        });
+        run.frame(F {
+            render: 60.0,
+            ..steady(64.0)
+        });
+        let h = run.detector.last().unwrap();
+        assert_eq!(h.cause_line(), "pipeline build pbr, 40.0 ms (frame before)");
+        assert_eq!(h.cause_key(), "pipeline build");
+        frame_notes::listen(false);
+    }
+
+    /// The F2 overlay is the one tool whose cost does run on: its next
+    /// frames draw more HUD than before it opened (4 to 8 ms in debug),
+    /// with no note of their own. Its note's time is still its own frame's,
+    /// so it never covers the next frame's excess: a stall there is named
+    /// by whose time it was, with the overlay beside it as the hint.
+    #[test]
+    fn a_stall_after_the_overlay_opened_names_the_overlay_beside_it() {
+        use flint_core::frame_notes::{self, NoteKind};
+        frame_notes::listen(true);
+        let mut run = Run::new(None);
+        run.frames(120, steady(HZ60_MS));
+        frame_notes::note(NoteKind::StatsOverlay, || "opened".into(), Some(95.0));
+        run.frame(F {
+            render: 97.0,
+            ..steady(100.0)
+        });
+        let stall = F {
+            scripts: 60.0,
+            ..steady(HZ60_MS + 59.0)
+        };
+        assert_eq!(
+            run.frame_scripts(stall, &[("scripts/stall.rhai:on_update", 60.0)]),
+            1
+        );
+        let h = run.detector.last().unwrap();
+        assert_eq!(
+            h.cause_line(),
+            "script stall.rhai:on_update 60.0 ms \
+             (also: stats overlay 95.0 ms the frame before)"
+        );
+        assert_eq!(h.cause_key(), "script stall.rhai:on_update");
+        assert_eq!(h.class(), "player");
         frame_notes::listen(false);
     }
 }

@@ -148,19 +148,28 @@ impl Problem {
                     ),
                     Some(_) => "a game's own field is declared in its schema layer".to_string(),
                 };
-                let hint = diagnostic::did_you_mean(&key, declared.iter().map(String::as_str))
-                    .unwrap_or_else(|| {
-                        format!(
-                            "the fields of `{owner}` are {}; {how}",
-                            listed(declared.iter())
-                        )
-                    });
-                Diagnostic::warning(
-                    codes::UNKNOWN_FIELD,
-                    format!("`{owner}` has no field `{key}`"),
-                )
-                .field(field)
-                .hint(hint)
+                // A field the schema took out says why, not what is near it
+                // (#1212)
+                let retired = table.is_none().then(|| schema.retired.get(&key)).flatten();
+                let (message, hint) = match retired {
+                    Some(why) => (
+                        format!("`{owner}` has no field `{key}` any more"),
+                        why.clone(),
+                    ),
+                    None => (
+                        format!("`{owner}` has no field `{key}`"),
+                        diagnostic::did_you_mean(&key, declared.iter().map(String::as_str))
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "the fields of `{owner}` are {}; {how}",
+                                    listed(declared.iter())
+                                )
+                            }),
+                    ),
+                };
+                Diagnostic::warning(codes::UNKNOWN_FIELD, message)
+                    .field(field)
+                    .hint(hint)
             }
             Problem::BadType {
                 field,
@@ -439,6 +448,8 @@ fn check_value(
             }
         }
         (FieldType::Table, toml::Value::Table(_)) => {}
+        // The component's reader judges an `any` value's form
+        (FieldType::Any, _) => {}
         (FieldType::Array { element }, toml::Value::Array(arr)) => {
             for (i, item) in arr.iter().enumerate() {
                 check_value(
@@ -503,6 +514,9 @@ pub struct Reference {
     /// The name written.
     pub name: String,
     pub kind: ReferenceKind,
+    /// The names the field takes with no file (an asset's `builtins`,
+    /// #1063): none of them is a reference, and a miss's hint offers them.
+    pub builtins: Vec<String>,
 }
 
 /// Every entity and asset `data` names as a `schema` component, by field
@@ -511,7 +525,8 @@ pub struct Reference {
 ///
 /// Left out: an empty string (the reference is not set; a script fills it),
 /// a value that is not a string ([`validate_component`] has said `bad-type`),
-/// an asset with no kind, and an asset whose `unless` sibling is `true`.
+/// an asset with no kind, an asset whose `unless` sibling is `true`, and an
+/// asset that is one of its field's `builtins` (`"amber"`, `"none"`, #1063).
 pub fn references(schema: &ComponentSchema, data: &toml::Value) -> Vec<Reference> {
     let mut found = Vec::new();
     if let Some(table) = data.as_table() {
@@ -547,26 +562,34 @@ fn value_references(
     siblings: &toml::Table,
     found: &mut Vec<Reference>,
 ) {
-    let named = |kind: ReferenceKind| {
+    let named = |kind: ReferenceKind, builtins: &[String]| {
         value
             .as_str()
-            .filter(|name| !name.is_empty())
+            .filter(|name| !name.is_empty() && !builtins.iter().any(|b| b == name))
             .map(|name| Reference {
                 field: path.to_string(),
                 name: name.to_string(),
                 kind,
+                builtins: builtins.to_vec(),
             })
     };
     match (field_type, value) {
-        (FieldType::Entity, _) => found.extend(named(ReferenceKind::Entity)),
-        (FieldType::Asset { kinds, unless }, _) => {
+        (FieldType::Entity, _) => found.extend(named(ReferenceKind::Entity, &[])),
+        (
+            FieldType::Asset {
+                kinds,
+                unless,
+                builtins,
+            },
+            _,
+        ) => {
             let off = unless
                 .as_deref()
                 .and_then(|sibling| siblings.get(sibling))
                 .and_then(toml::Value::as_bool)
                 .unwrap_or(false);
             if !off && !kinds.is_empty() {
-                found.extend(named(ReferenceKind::Asset(kinds.clone())));
+                found.extend(named(ReferenceKind::Asset(kinds.clone()), builtins));
             }
         }
         (FieldType::Array { element }, toml::Value::Array(items)) => {
@@ -679,6 +702,7 @@ mod tests {
             description: None,
             fields,
             panel: None,
+            retired: Default::default(),
         }
     }
 
@@ -874,6 +898,7 @@ mod tests {
             description: None,
             fields: HashMap::new(),
             panel: None,
+            retired: Default::default(),
         };
         let data: toml::Value = toml::from_str("slots = 4\nitems = [\"key\"]\n").unwrap();
         assert_eq!(validate_component(&schema, &data), []);
@@ -1039,6 +1064,33 @@ mod tests {
         // `unless`: a mesh that code uploads has no file to look for
         let runtime: toml::Value = toml::from_str("asset = \"blob\"\nruntime = true\n").unwrap();
         assert_eq!(references(&schema, &runtime), []);
+    }
+
+    /// #1063: a name the field's `builtins` lists needs no file, so it is no
+    /// reference; any other name is, and carries the list for its hint.
+    #[test]
+    fn a_built_in_name_is_no_reference() {
+        let schema = schema_of(
+            "palette = { type = \"asset\", kind = \"palettes\", builtins = [\"amber\", \"cga\"] }\n\
+             paper = { type = \"asset\", kind = \"papers\", builtins = [\"none\"] }\n",
+        );
+        let named = |text: &str| -> Vec<(String, Vec<String>)> {
+            let data: toml::Value = toml::from_str(text).unwrap();
+            assert_eq!(validate_component(&schema, &data), []);
+            references(&schema, &data)
+                .into_iter()
+                .map(|r| (r.name, r.builtins))
+                .collect()
+        };
+        assert_eq!(named("palette = \"amber\"\npaper = \"none\"\n"), []);
+        let strings = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            named("palette = \"ambr\"\npaper = \"cold_press\"\n"),
+            [
+                ("ambr".to_string(), strings(&["amber", "cga"])),
+                ("cold_press".to_string(), strings(&["none"])),
+            ]
+        );
     }
 
     /// The old error variants name their field now (#683).

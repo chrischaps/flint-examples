@@ -13,6 +13,8 @@
 //! device takes it alone ([`gpu_alone`]); the rest take [`gpu`], which
 //! lends it as `shared_gpu` decides (`FLINT_GPU_TEST_PARALLEL`).
 
+#![allow(clippy::disallowed_methods)] // the test's own targets and read-backs, not the renderer's, so uncounted (#1091)
+
 mod shared_gpu;
 
 use flint_ecs::FlintWorld;
@@ -112,17 +114,29 @@ impl Gpu {
 
     /// The last frame's RGBA8 pixels, row by row.
     fn pixels(&self) -> Vec<u8> {
-        let row = (SIZE * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        read_pixels(self.device, self.queue, &self.color, SIZE)
+    }
+}
+
+/// A `size`-square RGBA8 texture's pixels, row by row.
+fn read_pixels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    color: &wgpu::Texture,
+    size: u32,
+) -> Vec<u8> {
+    {
+        let row = (size * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: (row * SIZE) as u64,
+            size: (row * size) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
-            self.color.as_image_copy(),
+            color.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
                 buffer: &buffer,
                 layout: wgpu::TexelCopyBufferLayout {
@@ -132,24 +146,24 @@ impl Gpu {
                 },
             },
             wgpu::Extent3d {
-                width: SIZE,
-                height: SIZE,
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
         );
-        self.queue.submit([encoder.finish()]);
+        queue.submit([encoder.finish()]);
         buffer
             .slice(..)
             .map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        let _ = flint_render::wait_for_gpu(&self.device);
+        let _ = flint_render::wait_for_gpu(device);
         let data = buffer
             .slice(..)
             .get_mapped_range()
             .expect("mapped buffer range");
-        (0..SIZE as usize)
+        (0..size as usize)
             .flat_map(|y| {
                 let start = y * row as usize;
-                data[start..start + SIZE as usize * 4].to_vec()
+                data[start..start + size as usize * 4].to_vec()
             })
             .collect()
     }
@@ -3418,6 +3432,192 @@ fn per_entity_styles_scissored_to_their_props_draw_the_same_bytes() {
     assert!(gpu.frame(&mut renderer, &world) == scissored);
 }
 
+/// #930: per-entity ASCII's edge cell pass is scissored to the cells around
+/// its entities (#385), and since #910 the thin and corner passes run over
+/// the whole grid, reading those edge cells up to three cells away and
+/// last frame's cells and slots (#477's history). An ASCII crate moves
+/// through a ring of plain crates, whose silhouettes put real edges a few
+/// cells outside it, for a dozen frames with history on: each frame,
+/// scissored and full, is the same bytes and the same text. Before #930 the
+/// full passes kept the plain crates' lines in the cells round the crate's
+/// region, the scissored ones nothing, and the frame after the crate's
+/// jump started from those different pasts: two pixels of its outline
+/// differed (and none with `temporal = "off"` or `hysteresis = 0`).
+#[test]
+fn a_moving_ascii_crate_draws_the_same_scissored_as_full_frame_after_frame() {
+    let Some(gpu) = gpu() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    use flint_render::entity_style::set_entity_style;
+    use flint_render::style_mask::IdBounds;
+    // Enough cells that the crate's region is a small part of the grid
+    const BIG: u32 = 256;
+    let target = |format, usage| {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: BIG,
+                height: BIG,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    };
+    let color = target(
+        FORMAT,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+    );
+    let color_view = color.create_view(&Default::default());
+    let depth = target(
+        wgpu::TextureFormat::Depth32Float,
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    );
+    let depth_view = depth.create_view(&Default::default());
+
+    // Close enough that the crate's outline is a few cells long
+    let camera = Camera {
+        position: flint_core::Vec3::new(5.0, 5.0, 5.0),
+        ..Camera::default()
+    };
+    let vec3 = |v: [f64; 3]| toml::Value::Array(v.iter().map(|&x| x.into()).collect());
+    let place = |world: &mut FlintWorld, name: &str, at: [f64; 3], turn: f64, half: f64| {
+        let id = world
+            .get_id(name)
+            .or_else(|| world.spawn(name).ok())
+            .unwrap();
+        let mut transform = toml::Table::new();
+        transform.insert("position".into(), vec3(at));
+        transform.insert("rotation".into(), vec3([0.0, turn, 0.0]));
+        world
+            .set_component(id, "transform", transform.into())
+            .unwrap();
+        let mut bounds = toml::Table::new();
+        bounds.insert("min".into(), vec3([-half; 3]));
+        bounds.insert("max".into(), vec3([half; 3]));
+        world.set_component(id, "bounds", bounds.into()).unwrap();
+        id
+    };
+    // Where the ASCII crate is each frame: sliding a cell or so, a jump of
+    // four cells (past its last region), standing still, sliding back
+    let path: Vec<[f64; 3]> = (0..6)
+        .map(|i| [-1.6 + 0.25 * i as f64, 0.0, 0.3])
+        .chain([[0.9, 0.0, -0.6]; 3])
+        .chain((0..3).map(|i| [0.9 - 0.3 * i as f64, 0.0, -0.6 + 0.3 * i as f64]))
+        .collect();
+
+    let styles = flint_render::stylize::StyleRegistry::new();
+    for cell in [8.0, 4.0] {
+        let mut world = FlintWorld::new();
+        boxed(&mut world, "floor", 30.0, -30.0, None);
+        // The ring: crates a metre or two from the path (four to eight 8 px
+        // cells), turned so their outlines meet in corners
+        for (i, (at, turn, half)) in [
+            ([-2.4, 0.0, -1.0], 20.0, 0.5),
+            ([-0.4, 0.0, 1.6], 55.0, 0.45),
+            ([0.6, 0.0, 1.4], 10.0, 0.4),
+            ([2.2, 0.0, -0.2], 35.0, 0.6),
+            ([0.0, 0.0, -2.0], 70.0, 0.5),
+            ([-1.2, 0.9, -1.8], 0.0, 0.35),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            place(&mut world, &format!("plain{i}"), at, turn, half);
+        }
+        let crate_id = place(&mut world, "glyphs", path[0], 25.0, 0.45);
+        set_entity_style(&mut world, &styles, crate_id, "ascii").unwrap();
+
+        let make = |scissor: bool| {
+            let mut renderer = SceneRenderer::new_headless(
+                gpu.device,
+                gpu.queue,
+                FORMAT,
+                BIG,
+                BIG,
+                RendererConfig::default(),
+            );
+            renderer.set_style_scissor(scissor);
+            // The screen grid's cell, which the edge cells are on (a crate
+            // with a cell of its own keeps tone glyphs): a table presetting
+            // the entities' settings, which doesn't draw the whole frame
+            let mut config = renderer.post_process_config().clone();
+            config.styles.set_option("ascii", "scope", "entities");
+            config.styles.set_param("ascii", "cell", cell);
+            renderer.set_post_process_config(config);
+            renderer.ensure_style_resources(gpu.device);
+            renderer.set_style_text_capture(true);
+            renderer
+        };
+        let (mut scissored, mut full) = (make(true), make(false));
+        let draw = |renderer: &mut SceneRenderer, world: &FlintWorld, frame: usize| {
+            let inputs = flint_render::FrameInputs {
+                time: frame as f64 / 60.0,
+                dt: 1.0 / 60.0,
+                ..Default::default()
+            };
+            renderer.prepare(gpu.device, gpu.queue, world, &inputs);
+            renderer.render_to(gpu.device, gpu.queue, &depth_view, &camera, &color_view);
+            let _ = flint_render::wait_for_gpu(gpu.device);
+            let pixels = read_pixels(gpu.device, gpu.queue, &color, BIG);
+            let text = renderer
+                .style_text(gpu.device, "ascii")
+                .expect("ASCII drew its cells as text");
+            (pixels, text)
+        };
+        let mut edge_glyphs = 0;
+        for (frame, &at) in path.iter().enumerate() {
+            place(&mut world, "glyphs", at, 25.0 + 3.0 * frame as f64, 0.45);
+            let (a, a_text) = draw(&mut scissored, &world, frame);
+            let (b, b_text) = draw(&mut full, &world, frame);
+
+            // The scissor is drawing only around the crate: its bounds
+            // are a small part of the frame
+            let bounds = scissored.style_screen_bounds(&camera);
+            let ids = scissored.style_ids().clone();
+            assert_eq!(ids.len(), 1, "{ids:?}");
+            for (id, name) in ids.iter() {
+                let IdBounds::Uv(r) = bounds.get(id) else {
+                    panic!("{name}: {:?}", bounds.get(id));
+                };
+                assert!(r[2] - r[0] < 0.3 && r[3] - r[1] < 0.3, "{name} fills {r:?}");
+            }
+
+            let rows: Vec<String> = (0..a_text.rows).map(|y| a_text.line(y)).collect();
+            if a_text != b_text {
+                let full_rows: Vec<String> = (0..b_text.rows).map(|y| b_text.line(y)).collect();
+                panic!(
+                    "cell {cell}, frame {frame}: the scissored cells differ from the full ones\n\
+                     scissored:\n{}\nfull:\n{}",
+                    rows.join("\n"),
+                    full_rows.join("\n")
+                );
+            }
+            let differing = a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p != q).count();
+            assert!(
+                differing == 0,
+                "cell {cell}, frame {frame}: {differing} pixels differ scissored from full"
+            );
+            // Line glyphs drawn on the crate, so the edges are in play
+            edge_glyphs += rows
+                .iter()
+                .flat_map(|r| r.chars())
+                .filter(|c| ('\u{2500}'..='\u{257f}').contains(c))
+                .count();
+        }
+        assert!(
+            edge_glyphs > 3 * path.len(),
+            "cell {cell}: only {edge_glyphs} edge glyphs over {} frames",
+            path.len()
+        );
+    }
+}
+
 /// #538: per-entity watercolor (its wash, blur and paint passes) and a
 /// user style that declares its `reach` are scissored as pencil and ASCII
 /// are: the frame is the full one byte for byte, and a style that breaks
@@ -3740,6 +3940,92 @@ fn the_mask_buffer_fits_the_scene_and_masks_every_styled_draw() {
     eprintln!("{} covered pixels, {missed} left unmasked", covered.len());
     assert!(covered.len() > n / 8, "the boxes cover too little to tell");
     assert_eq!(missed, 0, "{missed} box pixels were not masked");
+}
+
+/// #1011: a styled billboard is masked, every pixel its quad covers and
+/// no other, single-sample and under MSAA (the mask walked no billboard
+/// draw, so its style never drew). An untextured sprite is the white quad,
+/// whole; the alpha cut-out is the `style-mask-billboard` golden's.
+#[test]
+fn a_styled_billboard_is_masked_where_it_draws() {
+    let Some(gpu) = gpu() else {
+        eprintln!("no GPU adapter; skipping");
+        return;
+    };
+    let mut renderer = SceneRenderer::new_headless(
+        gpu.device,
+        gpu.queue,
+        FORMAT,
+        SIZE,
+        SIZE,
+        RendererConfig::default(),
+    );
+    renderer.set_debug_mode(flint_render::DebugMode::StyleMask);
+    let vec3 = |v: [f64; 3]| toml::Value::Array(v.iter().map(|&x| x.into()).collect());
+    let mut world = FlintWorld::new();
+    let e = world.spawn("sprite").unwrap();
+    let mut transform = toml::Table::new();
+    transform.insert("position".into(), vec3([0.0, 0.0, 0.0]));
+    world
+        .set_component(e, "transform", transform.into())
+        .unwrap();
+    let mut sprite = toml::Table::new();
+    sprite.insert("width".into(), 9.0.into());
+    sprite.insert("height".into(), 7.0.into());
+    sprite.insert("anchor_y".into(), 0.5.into());
+    world.set_component(e, "sprite", sprite.into()).unwrap();
+    let style = |on: bool| {
+        let mut t = toml::Table::new();
+        t.insert("style".into(), "probe".into());
+        t.insert("enabled".into(), on.into());
+        toml::Value::Table(t)
+    };
+    let px = |f: &[u8], i: usize| [f[i * 4], f[i * 4 + 1], f[i * 4 + 2]];
+    let n = (SIZE * SIZE) as usize;
+    for samples in [1, 4] {
+        renderer.set_msaa(gpu.device, samples);
+        world.set_component(e, "style_mask", style(false)).unwrap();
+        let unstyled = gpu.frame(&mut renderer, &world);
+        world.set_component(e, "style_mask", style(true)).unwrap();
+        let styled = gpu.frame(&mut renderer, &world);
+        let (_, draws) = renderer.style_mask_draws().expect("no mask pass");
+        assert_eq!(draws, 1, "{samples}x: the billboard is the mask's one draw");
+        let empty = gpu.frame(&mut renderer, &FlintWorld::new());
+        // The sprite's pixels: the white quad, far from the background.
+        // The faint glow its depth gives the frame around it (a level or
+        // two) is no part of it, and no mask touches it
+        let diff = |a: [u8; 3], b: [u8; 3]| (0..3).map(|k| a[k].abs_diff(b[k]) as u32).sum::<u32>();
+        let covered: Vec<usize> = (0..n)
+            .filter(|&i| diff(px(&unstyled, i), px(&empty, i)) > 24)
+            .collect();
+        let missed = covered
+            .iter()
+            .filter(|&&i| px(&styled, i) == px(&unstyled, i))
+            .count();
+        // Off it: a pixel the sprite leaves exactly as it was, painted in
+        // a mask id's colour (blue, id 1). Under MSAA an edge pixel the quad
+        // covers in part is masked when any sample is, and is neither
+        let id_blue = |p: [u8; 3]| p[2] > p[0].saturating_add(60);
+        let spilled = (0..n)
+            .filter(|&i| px(&unstyled, i) == px(&empty, i) && id_blue(px(&styled, i)))
+            .count();
+        eprintln!(
+            "{samples}x: {} sprite pixels, {missed} unmasked, {spilled} masked off it",
+            covered.len()
+        );
+        assert!(
+            covered.len() > n / 8,
+            "{samples}x: the sprite covers too little"
+        );
+        assert_eq!(
+            missed, 0,
+            "{samples}x: {missed} sprite pixels were not masked"
+        );
+        assert_eq!(
+            spilled, 0,
+            "{samples}x: {spilled} pixels masked off the sprite"
+        );
+    }
 }
 
 /// #324: the palette style draws every pixel in its table's colours, the
@@ -4902,6 +5188,123 @@ reads = ["acc"]
         .filter(|n| n.starts_with("utest_history"))
         .collect();
     assert_eq!(names, ["utest_history.acc.a", "utest_history.acc.b"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #1136: a user style's history target handed out after a frame and taken
+/// back into a fresh renderer draws that frame again, and the frames after
+/// it as the first renderer does. A history whose key is another frame's
+/// (another size) is no past: that frame draws fresh and says why.
+#[test]
+fn a_history_target_handed_to_a_fresh_renderer_draws_the_captured_frame_again() {
+    let Some(gpu) = gpu() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    let (dir, registry) = user_style(
+        "history-1136",
+        &[
+            (
+                "utest_carry.shader.toml",
+                r#"version = 1
+name = "utest_carry"
+
+[[passes]]
+name = "acc"
+shader = "acc.wgsl"
+target = "acc"
+history = true
+reads = ["acc"]
+
+[[passes]]
+name = "show"
+shader = "show.wgsl"
+reads = ["acc"]
+"#,
+            ),
+            (
+                "acc.wgsl",
+                "fn style(p: StylePixel) -> vec4<f32> {\n    \
+                 return vec4<f32>(flint_target_acc(p.uv).r + 0.125, flint.history, 0.0, 1.0);\n}\n",
+            ),
+            (
+                "show.wgsl",
+                "fn style(p: StylePixel) -> vec4<f32> {\n    \
+                 let a = flint_target_acc(p.uv);\n    \
+                 return vec4<f32>(a.r, a.g, 0.0, 1.0);\n}\n",
+            ),
+        ],
+    );
+    let world = box_world();
+    let value = |p: Vec<u8>| (p[0] as f32 / 255.0, p[1] as f32 / 255.0);
+    let close = |a: f32, b: f32| (a - b).abs() < 0.02;
+
+    // Two frames, then the second's history (the first frame's target, which
+    // the second read), as a capture of the second takes it
+    let mut first = style_on(&gpu, &registry, "utest_carry");
+    gpu.frame(&mut first, &world);
+    let (r2, h2) = value(gpu.frame(&mut first, &world));
+    assert!(close(r2, 0.25) && close(h2, 1.0), "frame 2: {r2} {h2}");
+    let mut encoder = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    let mut state = first.capture_replay_state(gpu.device, &mut encoder, &world);
+    gpu.queue.submit(Some(encoder.finish()));
+    state.wait(gpu.device);
+    let (renderer_state, read) = state.read().unwrap();
+    let history = &renderer_state.style_history;
+    assert_eq!(history.len(), 1, "{history:?}");
+    let part = &history[0].parts[0];
+    assert_eq!(
+        (history[0].style.as_str(), part.name.as_str()),
+        ("utest_carry", "targets")
+    );
+    assert!(part.used, "the second frame read the first's");
+    assert_eq!(part.textures.len(), 1);
+    assert_eq!(read.history.len(), 1);
+    let imported = |state: &flint_render::stylize::history::StyleHistoryState| {
+        flint_render::stylize::history::ImportedHistory::new(
+            state.clone(),
+            read.history
+                .iter()
+                .map(|(f, b)| (f.clone(), std::sync::Arc::new(b.clone())))
+                .collect(),
+        )
+    };
+    // A fresh renderer given the history draws the captured frame again
+    let mut fresh = style_on(&gpu, &registry, "utest_carry");
+    fresh.import_style_history(vec![imported(&history[0])]);
+    let (r, h) = value(gpu.frame(&mut fresh, &world));
+    assert!(close(r, r2) && close(h, h2), "taken back: {r} {h}");
+    assert_eq!(
+        fresh.take_style_history_notes(),
+        ["utest_carry: history taken from the capture"]
+    );
+    // And goes on from it as the first renderer does
+    let (r3, _) = value(gpu.frame(&mut first, &world));
+    let (r, _) = value(gpu.frame(&mut fresh, &world));
+    assert!(
+        close(r3, 0.375) && close(r, r3),
+        "the frame after: {r} vs {r3}"
+    );
+
+    // Without it, a fresh renderer's frame is a first frame
+    let mut bare = style_on(&gpu, &registry, "utest_carry");
+    let (r, h) = value(gpu.frame(&mut bare, &world));
+    assert!(close(r, 0.125) && close(h, 0.0), "no history: {r} {h}");
+
+    // A key that isn't this frame's is no past
+    let mut other = history[0].clone();
+    other.parts[0].key["targets"][0]["size"] = serde_json::json!([3, 3]);
+    let mut keyed = style_on(&gpu, &registry, "utest_carry");
+    keyed.import_style_history(vec![imported(&other)]);
+    let (r, h) = value(gpu.frame(&mut keyed, &world));
+    assert!(close(r, 0.125) && close(h, 0.0), "another frame's: {r} {h}");
+    let notes = keyed.take_style_history_notes();
+    assert!(
+        notes.len() == 1 && notes[0].contains("another frame's") && notes[0].contains("size"),
+        "{notes:?}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

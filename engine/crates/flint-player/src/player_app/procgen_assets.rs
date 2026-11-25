@@ -125,6 +125,19 @@ pub fn collect_requests(
     resolver: &ProcGenResolver,
     sink: &dyn AssetSink,
 ) -> Vec<AssetRequest> {
+    let ids: Vec<EntityId> = world.all_entities().iter().map(|e| e.id).collect();
+    collect_requests_of(world, &ids, config, resolver, sink)
+}
+
+/// [`collect_requests`] for the entities `ids` alone: a chunk's, or a
+/// script's spawns (#1107).
+pub fn collect_requests_of(
+    world: &FlintWorld,
+    ids: &[EntityId],
+    config: &ModelLoadConfig,
+    resolver: &ProcGenResolver,
+    sink: &dyn AssetSink,
+) -> Vec<AssetRequest> {
     let mut seen: HashSet<(String, bool)> = HashSet::new();
     let mut requests = Vec::new();
     let mut want = |name: &str, kind: AssetKind, position: [f32; 3]| {
@@ -143,22 +156,20 @@ pub fn collect_requests(
         }
     };
 
-    for entity in world.all_entities() {
-        if world.get_components(entity.id).is_none() {
+    for &id in ids {
+        if world.get_components(id).is_none() {
             continue;
         }
         // Through the typed view (ADR 0115): a wrong type is reported once
-        let position = world
-            .view(entity.id, comp::TRANSFORM)
-            .vec3("position", [0.0; 3]);
-        let model = world.view(entity.id, comp::MODEL);
+        let position = world.view(id, comp::TRANSFORM).vec3("position", [0.0; 3]);
+        let model = world.view(id, comp::MODEL);
         if !model.bool("runtime", false) {
             if let Some(name) = model.opt_str("asset") {
                 want(name, AssetKind::Model, position);
             }
         }
         for comp_name in [comp::MATERIAL, comp::SPRITE] {
-            if let Some(tex) = world.view(entity.id, comp_name).opt_str("texture") {
+            if let Some(tex) = world.view(id, comp_name).opt_str("texture") {
                 want(tex, AssetKind::Texture, position);
             }
         }
@@ -176,6 +187,10 @@ pub fn resolve(
 ) -> Vec<(AssetRequest, Outcome)> {
     let mut outcomes = Vec::with_capacity(requests.len());
     for req in requests {
+        // Each asset by name in a load report (#1092)
+        let _span = flint_core::load_report::span(flint_core::load_report::Stage::Procgen, || {
+            req.name.clone()
+        });
         let outcome = resolve_one(req, resolver, sink, mode);
         log_outcome(req, &outcome);
         outcomes.push((req.clone(), outcome));
@@ -262,6 +277,7 @@ pub fn image_set_name(name: &str, index: usize, semantics: ChannelSemantics) -> 
         ChannelSemantics::Metallic => "metallic",
         ChannelSemantics::Height => "height",
         ChannelSemantics::Mask => "mask",
+        ChannelSemantics::Splat => "splat",
     };
     format!("{name}_{suffix}")
 }
@@ -470,7 +486,8 @@ impl AssetSink for GpuSink<'_> {
             name,
             image.width,
             image.height,
-            &image.pixels,
+            // A terrain_v1 heightmap is 16-bit grey (#1168): drawn as grey
+            &image.to_rgba8(),
             is_normal,
         ) {
             tracing::warn!("Failed to upload procgen texture '{name}': {e}");
@@ -559,22 +576,38 @@ impl AssetSink for GpuSink<'_> {
 /// placeholder for each other name. Runs before the model loader, which then
 /// skips every name this uploaded.
 pub fn resolve_scene(
-    scene_path: &str,
-    world: &mut FlintWorld,
-    resolver: &mut ProcGenResolver,
+    core: &mut super::game_core::GameCore,
     mode: ProcGenMode,
     mut sink: GpuSink<'_>,
 ) {
+    let super::game_core::GameCore {
+        scene_path,
+        world,
+        procgen_resolver: resolver,
+        collider_sources,
+        #[cfg(feature = "living")]
+        living_props,
+        ..
+    } = core;
+    let scene_path = scene_path.as_str();
     let started = web_time::Instant::now();
+    // The load report's procgen stage (#1092): the note below is made by
+    // hand once the time is known, which a load report doesn't hear
+    let _span = flint_core::load_report::span(flint_core::load_report::Stage::Procgen, String::new);
     discover_specs(resolver, &sink.config.project, scene_path);
     #[cfg(feature = "living")]
-    super::living_props::resolve(world, sink.config, resolver, &mut sink, mode);
+    super::living_props::resolve(world, sink.config, resolver, living_props, &mut sink, mode);
     let requests = collect_requests(world, sink.config, resolver, &sink);
     if requests.is_empty() {
         return;
     }
     let before = resolver.cache_stats();
-    resolve(&requests, resolver, &mut sink, mode);
+    // Each mesh's triangles kept for the colliders naming it (#1222)
+    let mut recording = super::collider_meshes::Recording {
+        sink: &mut sink,
+        sources: collider_sources,
+    };
+    resolve(&requests, resolver, &mut recording, mode);
     let stats = resolver.cache_stats();
     // A frame note (#1077) when the scene had assets to make or find
     flint_core::frame_notes::note(

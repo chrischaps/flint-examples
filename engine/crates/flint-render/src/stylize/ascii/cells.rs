@@ -264,8 +264,164 @@ pub(super) fn snap_grids(rows: &[VariantUniform]) -> Vec<[f32; 4]> {
     grids
 }
 
-/// Say once (#740) when a variant wanted a snap grid or a dissolve band and
-/// the frame had none left, naming the first such variant's entity.
+/// The snap owner state (#929, ascii_snap_owner.wgsl): a texel a cell of a
+/// snapping grid, the slot of the snapping variant holding the cell | the
+/// mask's blend at its first sample << 16; 0 for none.
+pub(super) const SNAP_OWNER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
+
+/// One snapping grid's rows in the snap owner state (#929): the cells near
+/// its snapping variants' bounds, every cell any of them can hold.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct OwnerBand {
+    pub(super) cell: [f32; 2],
+    pub(super) origin: [f32; 2],
+    /// The grid's first snapping variant: the pass reads the grid from its
+    /// row, drawn with it as the instance.
+    pub(super) slot: u32,
+    /// The grid's cell at the band's first texel.
+    pub(super) first: [i32; 2],
+    /// The band's first row, its rows and its cells across.
+    pub(super) row: u32,
+    pub(super) rows: u32,
+    pub(super) cols: u32,
+}
+
+impl OwnerBand {
+    /// The band as a variant row's `owner` and the uniform's `snap_bands`
+    /// hold it: (first cell x, y, first row + 1, columns | rows << 16).
+    pub(super) fn packed(&self) -> [i32; 4] {
+        [
+            self.first[0],
+            self.first[1],
+            self.row as i32 + 1,
+            (self.cols | (self.rows << 16)) as i32,
+        ]
+    }
+
+    /// Its texels in the snap owner state.
+    pub(super) fn rect(&self) -> kit::PixelRect {
+        kit::PixelRect {
+            x: 0,
+            y: self.row,
+            width: self.cols,
+            height: self.rows,
+        }
+    }
+
+    fn grid(&self) -> [u32; 4] {
+        grid_bits(self.cell, self.origin)
+    }
+}
+
+/// A grid (cell, origin) as bits, to compare as the shaders do.
+fn grid_bits(cell: [f32; 2], origin: [f32; 2]) -> [u32; 4] {
+    [cell[0], cell[1], origin[0], origin[1]].map(f32::to_bits)
+}
+
+/// Whether bounds (x0, y0, x1, y1) hold a pixel of a `size` frame.
+fn on_screen([x0, y0, x1, y1]: [f32; 4], size: [u32; 2]) -> bool {
+    x1 > x0 && y1 > y0 && x1 > 0.0 && y1 > 0.0 && x0 < size[0] as f32 && y0 < size[1] as f32
+}
+
+/// The cells of the grid (`c`, `o`) along one axis, [lo, hi], that a pixel
+/// of `[x0, x1)` on a `len`-pixel frame can be in (the shader's
+/// `floor((p - o) / c)` at the pixel centres), one more each side for its
+/// rounding.
+fn cells_along(x0: f32, x1: f32, len: u32, c: f32, o: f32) -> (i64, i64) {
+    let at = |x: f32| ((x - o) / c).floor() as i64;
+    (at(x0.max(0.0)) - 1, at(x1.min(len as f32)) + 1)
+}
+
+/// Gives each snapping grid (of the drawn variants with [`SNAP`]) a band of
+/// the snap owner state (#929), its cells over the union of its snapping
+/// variants' bounds, and each such variant's row its grid's
+/// [`OwnerBand::packed`]. A grid whose band would pass [`MAX_BAND_TEXELS`]
+/// gets none, and its variants' `owner` stays zeros (their pixels keep
+/// their own); so does one whose variants have nothing on screen.
+pub(super) fn assign_owner_bands(rows: &mut [VariantUniform], size: [u32; 2]) -> Vec<OwnerBand> {
+    // The grids, first met first, each with its span of cells
+    let mut grids: Vec<(OwnerBand, [i64; 4])> = Vec::new();
+    for (slot, row) in rows.iter_mut().enumerate().skip(1) {
+        row.owner = [0; 4];
+        if row.flags & (SNAP | PASS_THROUGH) != SNAP {
+            continue;
+        }
+        if !on_screen(row.bounds, size) {
+            continue;
+        }
+        let [x0, y0, x1, y1] = row.bounds;
+        let (cx0, cx1) = cells_along(x0, x1, size[0], row.cell[0], row.origin[0]);
+        let (cy0, cy1) = cells_along(y0, y1, size[1], row.cell[1], row.origin[1]);
+        let grid = grid_bits(row.cell, row.origin);
+        match grids.iter_mut().find(|(b, _)| b.grid() == grid) {
+            Some((_, span)) => {
+                *span = [span[0].min(cx0), span[1].min(cy0), span[2].max(cx1), span[3].max(cy1)];
+            }
+            None => grids.push((
+                OwnerBand {
+                    cell: row.cell,
+                    origin: row.origin,
+                    slot: slot as u32,
+                    first: [0, 0],
+                    row: 0,
+                    rows: 0,
+                    cols: 0,
+                },
+                [cx0, cy0, cx1, cy1],
+            )),
+        }
+    }
+    let mut bands: Vec<OwnerBand> = Vec::new();
+    let mut next = 0u64;
+    for (mut band, [cx0, cy0, cx1, cy1]) in grids {
+        let (cols, rows_tall) = ((cx1 - cx0 + 1) as u64, (cy1 - cy0 + 1) as u64);
+        if cols > MAX_BAND_TEXELS as u64 || next + rows_tall > MAX_BAND_TEXELS as u64 {
+            continue;
+        }
+        band.first = [cx0 as i32, cy0 as i32];
+        band.row = next as u32;
+        band.rows = rows_tall as u32;
+        band.cols = cols as u32;
+        next += rows_tall;
+        bands.push(band);
+    }
+    for row in rows.iter_mut().skip(1) {
+        if row.flags & (SNAP | PASS_THROUGH) != SNAP {
+            continue;
+        }
+        let grid = grid_bits(row.cell, row.origin);
+        if let Some(b) = bands.iter().find(|b| b.grid() == grid) {
+            row.owner = b.packed();
+        }
+    }
+    bands
+}
+
+/// Each of `snap_grids`' band, as the uniform's `snap_bands` holds them;
+/// zeros for a grid without one.
+pub(super) fn snap_bands(snapping: &[[f32; 4]], bands: &[OwnerBand]) -> [[i32; 4]; MAX_SNAP_GRIDS] {
+    let mut out = [[0; 4]; MAX_SNAP_GRIDS];
+    for (o, g) in out.iter_mut().zip(snapping) {
+        let grid = grid_bits([g[0], g[1]], [g[2], g[3]]);
+        if let Some(b) = bands.iter().find(|b| b.grid() == grid) {
+            *o = b.packed();
+        }
+    }
+    out
+}
+
+/// The snap owner state's size: every band, and never smaller than the
+/// texture held, so a frame with fewer bands keeps its bind group.
+pub(super) fn owner_texture_size(bands: &[OwnerBand], held: Option<[u32; 2]>) -> [u32; 2] {
+    let wide = bands.iter().map(|b| b.cols).max().unwrap_or(0);
+    let tall = bands.last().map_or(0, |b| b.row + b.rows);
+    let [w, h] = held.unwrap_or([1, 1]);
+    [wide.max(w).max(1), tall.max(h).max(1)]
+}
+
+/// Say once (#740) when a variant wanted a snap grid, a snap owner band or
+/// a dissolve band and the frame had none left, naming the first such
+/// variant's entity.
 pub(super) fn report_left_out(
     frame: &StyleFrame<'_>,
     rows: &[VariantUniform],
@@ -273,6 +429,7 @@ pub(super) fn report_left_out(
     snapping: &[[f32; 4]],
     bands: usize,
 ) {
+    let size = [frame.width, frame.height];
     let entity = |slot: usize| {
         slots
             .iter()
@@ -296,6 +453,21 @@ pub(super) fn report_left_out(
             MAX_SNAP_GRIDS,
             &entity(slot),
             "cut to whole cells of its own only: it fills no scene cells",
+        );
+    }
+    // A snapping grid past the snap owner state's rows (#929)
+    let unowned = rows
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, row)| drawn(row, SNAP) && row.owner[2] == 0 && on_screen(row.bounds, size));
+    if let Some((slot, _)) = unowned {
+        report_drop(
+            "ascii",
+            "rows of snap owner state",
+            MAX_BAND_TEXELS as usize,
+            &entity(slot),
+            "cut to the pixel: no cell of its grid is drawn whole",
         );
     }
     let unranked = rows
@@ -329,10 +501,12 @@ pub(super) struct EdgeRegions {
 }
 
 /// The edge cells the glyph pass reads inside output rect `glyph` (each
-/// cell under it, and one more on every side, since thinning asks a
-/// neighbour), and the edge pixels the edge cell pass sums for them. The
-/// cells are `cell` pixels from `origin` over a `size` frame; the edge
-/// cell texture is `grid` and the edge texture `edge_size`.
+/// cell under it, and more on every side: a drawn cell's corner reads
+/// `EDGE_CORNER_REACH` cells away, and the rect already holds
+/// `GLYPH_RECT_CELLS` of them round the entities, #930), and the edge
+/// pixels the edge cell pass sums for them. The cells are `cell` pixels
+/// from `origin` over a `size` frame; the edge cell texture is `grid` and
+/// the edge texture `edge_size`.
 pub(super) fn edge_regions(
     glyph: kit::PixelRect,
     cell: [f32; 2],
@@ -348,11 +522,12 @@ pub(super) fn edge_regions(
         };
     }
     // Texel t holds cell t - 1, the pixels from origin + (t - 1) * cell
+    let more = (EDGE_CORNER_REACH - GLYPH_RECT_CELLS) as i64;
     let texels = |start: u32, len: u32, c: f32, o: f32, n: u32| {
         let first = ((start as f32 - o) / c).floor() as i64; // cell under the first pixel
         let last = (((start + len) as f32 - 1.0 - o) / c).floor() as i64;
-        let t0 = (first + 1 - 1).clamp(0, n as i64) as u32;
-        let t1 = (last + 1 + 1).clamp(-1, n as i64 - 1);
+        let t0 = (first + 1 - more).clamp(0, n as i64) as u32;
+        let t1 = (last + 1 + more).clamp(-1, n as i64 - 1);
         (t0, (t1 + 1).max(t0 as i64) as u32 - t0)
     };
     let (tx, tw) = texels(glyph.x, glyph.width, cell[0], origin[0], grid[0]);
@@ -426,6 +601,40 @@ pub(super) struct History {
     pub(super) last: Option<(HistoryKey, u64)>,
     /// The camera the last frame drawn was seen from (#344).
     pub(super) last_view_proj: Option<[[f32; 4]; 4]>,
+    /// Whether the last frame drawn read its past, and the camera it took
+    /// as last frame's: what a frame capture hands out (#1136).
+    pub(super) used_past: bool,
+    pub(super) used_view_proj: [[f32; 4]; 4],
+}
+
+impl HistoryKey {
+    /// What a frame capture keys the tone history on (#1136): all of it
+    /// but the epoch, which is the capturing renderer's.
+    pub(super) fn exported(&self) -> serde_json::Value {
+        serde_json::json!({
+            "size": self.size,
+            "grid": self.grid,
+            "cell": self.cell.map(f32::from_bits),
+            "origin": self.origin.map(f32::from_bits),
+            "font": self.font,
+            "ramp": self.ramp,
+            "ramp_len": self.ramp_len,
+        })
+    }
+}
+
+impl EdgeKey {
+    /// What a frame capture keys the edge history on (#1136): all of it
+    /// but the epoch and the textures' generations, the capturing
+    /// renderer's.
+    pub(super) fn exported(&self) -> serde_json::Value {
+        serde_json::json!({
+            "size": self.size,
+            "depth_size": self.depth_size,
+            "cell": self.cell.map(f32::from_bits),
+            "origin": self.origin.map(f32::from_bits),
+        })
+    }
 }
 
 impl History {
@@ -486,6 +695,8 @@ pub(super) struct EdgePast {
     pub(super) cells: Option<Owned>,
     pub(super) slots: Option<Owned>,
     pub(super) last: Option<(EdgeKey, u64)>,
+    /// Whether the last frame drawn read them (#1136).
+    pub(super) used: bool,
 }
 
 impl EdgePast {

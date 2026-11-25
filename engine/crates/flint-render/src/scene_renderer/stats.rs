@@ -20,11 +20,69 @@ impl SceneRenderer {
         self.debug_state.mode = mode;
     }
 
+    /// Skip or repeat parts of every frame from now on, by label (#1317,
+    /// [`crate::pass_knobs`]): what `--skip-pass` / `--repeat-pass` and the
+    /// web's `?skip_pass=` / `?repeat_pass=` hand over. Empty knobs, or
+    /// `None`, draw every part once, as a renderer that was never told.
+    pub fn set_pass_knobs(&mut self, knobs: Option<crate::pass_knobs::PassKnobs>) {
+        self.pass_knobs = knobs
+            .filter(|k| !k.is_empty())
+            .map(|k| Box::new(crate::pass_knobs::KnobRun::new(k)));
+    }
+
+    /// The knobs set, if any.
+    pub fn pass_knobs(&self) -> Option<&crate::pass_knobs::PassKnobs> {
+        self.pass_knobs.as_deref().map(|run| &run.knobs)
+    }
+
+    /// How many times a host's own part named `label` (the player's `UI`)
+    /// should record its work this frame: 0 skipped, else 1, or the
+    /// repeat asked unless `refuse` says why it can't be (#1317).
+    pub fn pass_times(&mut self, label: &'static str, refuse: Option<&str>) -> u32 {
+        match self.pass_knobs.as_deref_mut() {
+            None => 1,
+            Some(run) => run.times(label, refuse),
+        }
+    }
+
     /// Collect rendering statistics for the current frame.
     ///
     /// Timing (`fps`, `frame_time_ms`) and `resolution` are left at zero —
     /// the caller fills these from their own timing and context.
     /// `scene_resolution` is the renderer's own.
+    /// Whether the last frame drew any of `entities` (#1191, a playtest's
+    /// `frame draws`, which asks of an entity and its descendants: a
+    /// model's nodes): `None` when the draw list holds nothing of them,
+    /// `Some(false)` when every draw they have was culled (frustum, level
+    /// of detail, draw distance, hidden). Read after a frame is encoded,
+    /// before the next `prepare` rebuilds the list. A draw with no bounds
+    /// (a procedural box, a wireframe) is never culled (ADR 0074).
+    pub fn entities_drawn(&self, entities: &[flint_core::EntityId]) -> Option<bool> {
+        let mut found = None;
+        let ours = |i: &&DrawItem| i.entity.is_some_and(|e| entities.contains(&e));
+        for item in self.draws.iter().filter(ours) {
+            if item.drawn() {
+                return Some(true);
+            }
+            found = Some(false);
+        }
+        found
+    }
+
+    /// Whether style `name` reached the last frame (#1191, a playtest's
+    /// `frame style`): post-processing on, the style on over the frame or
+    /// for an entity asking for it, and a blend and reveal that leave some
+    /// of it in the picture. `None` for a name no registered style has.
+    pub fn style_drawn(&self, name: &str) -> Option<bool> {
+        let style = self.styles().find(name)?;
+        let config = self.effective_post_process_config();
+        Some(
+            config.enabled
+                && style.is_on(config, &self.style_mask.ids)
+                && config.styles.shows_in(name, config),
+        )
+    }
+
     pub fn collect_stats(&self) -> crate::render_stats::RenderStats {
         use crate::grass_pipeline::BLADE_INDEX_COUNT;
 
@@ -108,10 +166,10 @@ impl SceneRenderer {
         // Grass: BLADE_INDEX_COUNT indices per instance
         triangles += self.grass.instance_count * BLADE_INDEX_COUNT / 3;
 
-        // Shadow stats: estimate as main pass × the layers drawn (the
-        // cascades, and a spot's, #504), counting only the draws that cast
-        // (ADR 0100)
-        let cascade_count = self.shadow_layers_drawn();
+        // Shadow stats: estimate as main pass × the views drawn (the
+        // cascades, a spot's, #504, and a point light's six faces, #1112),
+        // counting only the draws that cast (ADR 0100)
+        let cascade_count = self.shadow_views_drawn();
         let shadow_entity_draws = shadow_casters + terrain_draws;
         let shadow_draw_calls = shadow_entity_draws * cascade_count;
         let shadow_triangles = shadow_caster_triangles * cascade_count;
@@ -149,11 +207,66 @@ impl SceneRenderer {
                 .gpu_timer
                 .as_ref()
                 .map_or(0.0, |t| t.timings().frame_ms),
+            gpu_timestamps: self.gpu_timestamps(),
             scene_resolution: self.scene_size().into(),
             style_targets: style_memory.count,
             style_target_bytes: style_memory.bytes,
             full_size_targets: style_memory.full_size + fxaa_target,
+            gpu_calls: self.frame_gpu_calls,
+            gpu_memory: self.gpu_memory(),
             ..Default::default()
+        }
+    }
+
+    /// What the last frame created and wrote on the GPU (#1091): the
+    /// process's counted calls between the last two
+    /// [`frame_submitted`](Self::frame_submitted)s.
+    pub fn frame_gpu_calls(&self) -> crate::gpu_counts::GpuCalls {
+        self.frame_gpu_calls
+    }
+
+    /// The process's running totals as of the last
+    /// [`frame_submitted`](Self::frame_submitted), the frames this renderer
+    /// submitted, and how many of them created any GPU object (#1091): a
+    /// readout's window is the difference of two.
+    pub fn gpu_calls_reading(&self) -> (crate::gpu_counts::GpuCalls, u64, u64) {
+        (self.gpu_calls_at, self.gpu_frames.0, self.gpu_frames.1)
+    }
+
+    /// The texture memory this renderer knows it holds, by class, and its
+    /// mesh buffers (#1091). A walk of its own fields, no GPU call and no
+    /// allocation: cheap enough to ask every frame F2 shows. What it
+    /// doesn't know (uniform buffers, a style's own small textures, egui's)
+    /// is in [`gpu_counts::device_memory`](crate::gpu_counts::device_memory).
+    pub fn gpu_memory(&self) -> crate::gpu_counts::GpuMemory {
+        use crate::gpu_counts::bytes_of;
+        let post = self.postprocess_resources.as_ref();
+        let scene_targets = post.map_or(0, |r| r.scene_target_bytes())
+            + self.msaa.bytes()
+            + self
+                .scaled_depth
+                .as_ref()
+                .map_or(0, |d| bytes_of(&d.texture))
+            + self.water.grab_bytes();
+        let mesh_buffers = self.mesh_cache.buffer_bytes()
+            + self
+                .box_mesh_cache
+                .values()
+                .map(|b| b.vertex_buffer.size() + b.index_buffer.size())
+                .sum::<u64>();
+        crate::gpu_counts::GpuMemory {
+            scene_targets,
+            style_targets: self.style_target_summary().bytes,
+            shadow_maps: self
+                .shadow_pass
+                .as_ref()
+                .map_or(0, |s| bytes_of(&s.shadow_texture)),
+            model_textures: self.texture_cache.as_ref().map_or(0, |t| t.bytes()),
+            glyph_atlases: self
+                .postprocess_pipeline
+                .as_ref()
+                .map_or(0, |p| p.styles.glyph_atlas_bytes()),
+            mesh_buffers,
         }
     }
 
@@ -184,13 +297,26 @@ impl SceneRenderer {
         self.gpu_timer.is_some()
     }
 
-    /// The newest frame's GPU busy time read back since the last call, ms,
-    /// unsmoothed ([`GpuTimer::take_latest_frame_ms`]); `None` while timing
-    /// is off or when no read-back came in.
+    /// Whether the timer's timestamps read as pass times (#1316);
+    /// `Unchecked` while timing is off.
+    pub fn gpu_timestamps(&self) -> crate::gpu_timer::TimestampHealth {
+        self.gpu_timer
+            .as_ref()
+            .map(|t| t.timestamps())
+            .unwrap_or_default()
+    }
+
+    /// Each frame's GPU busy time read back since the last call, ms,
+    /// unsmoothed, with the index it was resolved under
+    /// ([`GpuTimer::take_frame_times`]); empty while timing is off or when
+    /// no read-back came in.
     ///
-    /// [`GpuTimer::take_latest_frame_ms`]: crate::GpuTimer::take_latest_frame_ms
-    pub fn take_gpu_frame_ms(&mut self) -> Option<f32> {
-        self.gpu_timer.as_mut()?.take_latest_frame_ms()
+    /// [`GpuTimer::take_frame_times`]: crate::GpuTimer::take_frame_times
+    pub fn take_gpu_frame_times(&mut self) -> impl Iterator<Item = crate::GpuFrameTime> + '_ {
+        self.gpu_timer
+            .as_mut()
+            .into_iter()
+            .flat_map(|t| t.take_frame_times())
     }
 
     /// The timer, while timing is on, for a host to time its own work (its
@@ -201,6 +327,39 @@ impl SceneRenderer {
     /// [`GpuTimer::end`]: crate::GpuTimer::end
     pub fn gpu_timer_mut(&mut self) -> Option<&mut crate::gpu_timer::GpuTimer> {
         self.gpu_timer.as_mut()
+    }
+
+    /// The scene pass's draws one frame times at most
+    /// ([`DrawControls::time_draws`](super::DrawControls::time_draws), #1203).
+    pub const DRAW_TIME_BATCH: usize = super::draw_times::BATCH;
+
+    /// The device features per-draw times need: timestamps, and timestamps
+    /// inside a pass.
+    pub const DRAW_TIME_FEATURES: wgpu::Features = super::draw_times::FEATURES;
+
+    /// The draws a pixel at which the overdraw heat map reaches its last
+    /// colour (#1203); each colour before it is half the draws.
+    pub const OVERDRAW_HEAT_TOP: u32 = super::overdraw::HEAT_TOP;
+
+    /// Read the draw times the last submitted frame took (#1203), waiting
+    /// for its GPU, into the times gathered since the last
+    /// [`reset_draw_times`](Self::reset_draw_times), which the next
+    /// described frame lays on its scene draws. `None` when that frame timed
+    /// nothing; it says how many draws the scene pass listed, so a host can
+    /// time the rest a batch a frame.
+    pub fn read_draw_times(&mut self, device: &wgpu::Device) -> Option<crate::DrawTimesRead> {
+        self.draw_times.read(device)
+    }
+
+    /// Why the last frame's asked-for draw times timed nothing (a device
+    /// without `TIMESTAMP_QUERY_INSIDE_PASSES`).
+    pub fn draw_times_refused(&self) -> Option<&'static str> {
+        self.draw_times.refused()
+    }
+
+    /// Forget the gathered draw times.
+    pub fn reset_draw_times(&mut self) {
+        self.draw_times.reset();
     }
 
     /// End the frame's GPU timing: pick up the times read back so far and

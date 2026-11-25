@@ -195,7 +195,9 @@ impl SceneRenderer {
     /// and, while the frame is captured, read as it ends: `dst`, the target
     /// the plan has it write, then every target of the chain's table it
     /// asked for while it drew that no earlier pass gave (a style's own
-    /// intermediates and history, a user style's targets).
+    /// intermediates and history, a user style's targets), then every
+    /// texture the style holds itself that it noted in `held` as it drew
+    /// (#1161: ASCII's edge cells and their history).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn run_style_part(
         &self,
@@ -205,19 +207,25 @@ impl SceneRenderer {
         encoder: &mut wgpu::CommandEncoder,
         run: &mut dyn FnMut(&mut wgpu::CommandEncoder),
         dst: Option<&str>,
+        refuse_repeat: Option<&str>,
+        held: Option<&crate::stylize::HeldTargets>,
     ) {
         if scopes.taps.is_none() {
-            scopes.run(label, encoder, run);
+            scopes.run_refusing(label, encoder, run, refuse_repeat);
             return;
         }
         let Some(resources) = &self.postprocess_resources else {
-            scopes.run(label, encoder, run);
+            scopes.run_refusing(label, encoder, run, refuse_repeat);
             return;
         };
         // What the part asks for, from here
         resources.styles.take_touched();
-        scopes.run(label, encoder, run);
+        if let Some(h) = held {
+            h.begin();
+        }
+        scopes.run_refusing(label, encoder, run, refuse_repeat);
         let touched = resources.styles.take_touched();
+        let held = held.map(|h| h.end()).unwrap_or_default();
         if let Some(dst) = dst {
             scopes.note(label, |p| {
                 p.writes(&[dst]);
@@ -227,6 +235,11 @@ impl SceneRenderer {
         else {
             return;
         };
+        for (id, texture) in &held {
+            if !log.targets.iter().any(|t| t.id == *id) {
+                log.targets.push(crate::frame_capture::target(id, texture));
+            }
+        }
         let Some(pass) = log.named(label) else {
             return;
         };
@@ -244,6 +257,10 @@ impl SceneRenderer {
                 pass.writes(&[name]);
                 taps.copy(device, encoder, pass, name, None, &texture, None);
             }
+        }
+        for (id, texture) in held {
+            pass.writes(&[id]);
+            taps.copy(device, encoder, pass, id, None, &texture, None);
         }
     }
 
@@ -290,6 +307,19 @@ impl SceneRenderer {
                     .map(|(t, _)| t.clone())
                     .ok_or("no grab");
             }
+            // A replay's overdraw view (#1203)
+            "overdraw_count" => {
+                return self
+                    .overdraw_textures()
+                    .map(|(count, _)| count.clone())
+                    .ok_or("no overdraw drawn");
+            }
+            "overdraw" => {
+                return self
+                    .overdraw_textures()
+                    .map(|(_, heat)| heat.clone())
+                    .ok_or("no overdraw drawn");
+            }
             _ => {}
         }
         let r = self.postprocess_resources.as_ref().ok_or("no HDR chain")?;
@@ -302,6 +332,14 @@ impl SceneRenderer {
             "fxaa_in" => r.fxaa.as_ref().map(|f| &f.texture),
             "fog_veil_behind" => r.fog_veil.as_ref().map(|v| &v.behind),
             "fog_veil" => r.fog_veil.as_ref().map(|v| &v.veil),
+            "selection_mask" => {
+                return self
+                    .selection_outline
+                    .as_ref()
+                    .and_then(|o| o.mask_texture())
+                    .cloned()
+                    .ok_or("no selection mask");
+            }
             _ => None,
         };
         if let Some(t) = texture {
@@ -423,11 +461,12 @@ impl SceneRenderer {
             render_scale: self.render_scale,
             debug_mode: format!("{:?}", self.debug_state.mode),
             selected: self.selected_entity.map(name),
+            grid: self.show_grid(),
             motion_hold: self.motion_hold.state(&name),
             skinning: Vec::new(),
             // Only while a draw binds an asset's shared palette (an entity
-            // before its first own write): it holds whichever entity wrote
-            // last, which isn't the same entity every run
+            // before its first own write); it is its owner's, the lowest id
+            // that wrote the asset (#1177), so the same every run
             asset_bones: if skinning.bone_binds.values().any(|b| !b.from_entity) {
                 skinning
                     .asset_bone_matrices
@@ -440,9 +479,49 @@ impl SceneRenderer {
             part_tints: by_entity(&skinning.part_tints, &name),
             part_softness: by_entity(&skinning.part_softness, &name),
             echo_lighten,
+            // Below, from the styles
+            style_history: Vec::new(),
         };
         capture.renderer = renderer;
+        // Each style's frame-to-frame history (#1136): the textures it read
+        // as last frame's, which the frame left as they were
+        if let Some(pp) = &self.postprocess_pipeline {
+            let frame = self
+                .style_frame_serial
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .wrapping_sub(1);
+            let (states, staged) = pp.styles.export_history(device, encoder, frame);
+            capture.stage_history(states, staged);
+        }
         capture
+    }
+}
+
+impl SceneRenderer {
+    /// Hand each style its history taken from a capture (#1136,
+    /// [`crate::stylize::history`]; read with
+    /// [`read_style_history`](crate::frame_replay::read_style_history)):
+    /// each keeps its own until the next frame it draws, and draws that
+    /// frame from it where the frame's key is the captured one. Call after
+    /// [`reset_style_history`](Self::reset_style_history), which a taken
+    /// history overrides. What the styles did with it is
+    /// [`take_style_history_notes`](Self::take_style_history_notes)'s.
+    pub fn import_style_history(
+        &mut self,
+        histories: Vec<crate::stylize::history::ImportedHistory>,
+    ) {
+        if let Some(pp) = &mut self.postprocess_pipeline {
+            pp.styles.import_history(histories);
+        }
+    }
+
+    /// What the styles said of the history handed to them since the last
+    /// call, a line each: taken, or why it was drawn fresh.
+    pub fn take_style_history_notes(&mut self) -> Vec<String> {
+        self.postprocess_pipeline
+            .as_mut()
+            .map(|pp| pp.styles.take_history_notes())
+            .unwrap_or_default()
     }
 }
 
@@ -452,8 +531,8 @@ impl SceneRenderer {
     /// bound and loaded: every bone, shadow and echo palette from
     /// `skinning` (`skinning.bin`'s bytes, indexed by `state.skinning`), the
     /// asset palettes, part tints and softness, which echoes lighten, the
-    /// motion hold's kept matrices and ticks, and the selected entity.
-    /// Entities are found in `world` by name; what names none is returned,
+    /// motion hold's kept matrices and ticks, the selected entity and the
+    /// floor grid. Entities are found in `world` by name; what names none is returned,
     /// a line each. Quality, MSAA, render scale and the config are the
     /// host's to set, as a load does.
     pub fn restore_replay_state(
@@ -516,7 +595,7 @@ impl SceneRenderer {
                 .get_skinned(asset)
                 .and_then(|meshes| meshes.first())
             {
-                queue.write_buffer(&mesh.bone_buffer, 0, bytemuck::cast_slice(m));
+                queue.write_buffer_counted(&mesh.bone_buffer, 0, bytemuck::cast_slice(m));
             }
         }
         for (name, tints) in &state.part_tints {
@@ -541,6 +620,8 @@ impl SceneRenderer {
         self.motion_hold.restore(&state.motion_hold, &mut id_of);
         let selected = state.selected.as_deref().and_then(&mut id_of);
         self.set_selected_entity(selected);
+        // The floor grid, drawn in the scene pass (#1211)
+        self.set_show_grid(device, state.grid);
         let mut said: Vec<String> = unknown
             .into_iter()
             .map(|n| format!("the capture's renderer state names {n:?}, which the replay's world has no entity of"))

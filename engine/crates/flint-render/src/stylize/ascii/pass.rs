@@ -1,5 +1,6 @@
 //! Drawing a frame: the passes in order (moved from `ascii.rs`, #742).
 
+use crate::gpu_counts::{CountedDevice, CountedQueue};
 use super::*;
 
 impl Ascii {
@@ -16,10 +17,11 @@ impl Ascii {
         stats: &Owned,
         variant_cells: [&Owned; 2],
         dissolve_ranks: &Owned,
+        snap_owners: &Owned,
     ) -> Arc<wgpu::BindGroup> {
         let mask = frame.mask.filter(|_| with_mask);
         let make = |mask: &wgpu::TextureView| {
-            frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("ASCII Entity BG"),
                 layout: &self.entity_bgl,
                 entries: &[
@@ -55,6 +57,10 @@ impl Ascii {
                         binding: 7,
                         resource: wgpu::BindingResource::TextureView(&edge_slots.view),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 8,
+                        resource: wgpu::BindingResource::TextureView(&snap_owners.view),
+                    },
                 ],
             })
         };
@@ -69,6 +75,7 @@ impl Ascii {
             stats.generation,
             variant_cells[0].generation,
             dissolve_ranks.generation,
+            snap_owners.generation,
             input.id * 2 + mask.is_some() as u64,
         ]);
         frame.bind("ASCII Entity BG", key, || {
@@ -91,7 +98,7 @@ impl Ascii {
         // Every slot is written, so an id a past frame held reads 0 again
         table.upload(frame.device, frame.queue, rows, slots);
         let main = frame.bind("ASCII Table BG", table.generation(), || {
-            frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("ASCII Table BG"),
                 layout: &self.table_bgl,
                 entries: &[
@@ -112,7 +119,7 @@ impl Ascii {
         });
         let edge_table = |name: &'static str, uniforms: &wgpu::Buffer| {
             frame.bind(name, table.generation(), || {
-                frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                     label: Some(name),
                     layout: &self.edge_bgl,
                     entries: &[
@@ -312,7 +319,7 @@ impl Ascii {
         // With and without the mask kept side by side: it comes and goes
         let variant = frame.mask.is_some() as u64;
         frame.depth_bind_over("ASCII Edge Source BG", variant, &over, || {
-            frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("ASCII Edge Source BG"),
                 layout: &self.source_bgl,
                 entries: &[
@@ -353,23 +360,33 @@ impl Ascii {
         cell: [f32; 2],
         [table, edge_table]: [&wgpu::BindGroup; 2],
         variants: usize,
-        glyph_rect: Option<kit::PixelRect>,
+        [glyph_rect, edge_area]: [Option<kit::PixelRect>; 2],
+        imported: Option<&crate::stylize::history::ImportedHistory>,
     ) {
         let origin = grid_origin([frame.width, frame.height], cell);
         // What the glyph pass reads of the edges inside its rect (#385):
-        // the edge cells under it and one beside (thinning asks a
-        // neighbour), and the edge pixels under those cells (the outline
+        // the edge cells under it and those its cells' corners reach
+        // (#930), and the edge pixels under those cells (the outline
         // pass's)
-        let regions = glyph_rect.map(|g| {
-            edge_regions(
-                g,
-                cell,
-                origin,
-                [frame.width, frame.height],
-                edge_cells.size,
-                frame.depth_size,
-            )
-        });
+        let regions_in = |rect: Option<kit::PixelRect>| {
+            rect.map(|g| {
+                edge_regions(
+                    g,
+                    cell,
+                    origin,
+                    [frame.width, frame.height],
+                    edge_cells.size,
+                    frame.depth_size,
+                )
+            })
+        };
+        let regions = regions_in(glyph_rect);
+        // The edge cell pass is cut to the same cells with the scissor off
+        // (#930): only the cells round the entities hold lines, so last
+        // frame's cells and slots, which this frame's start from (#477),
+        // are what they are with it on, where the pass never wrote the
+        // rest. The glyphs read no cell past them (`EDGE_CORNER_REACH`)
+        let kept_cells = regions_in(edge_area).map(|r| r.edge_cells);
         let source = self.edge_source_bind(frame);
         // Last frame's edge cells and slots (#477), copied aside before
         // this frame's passes write over them, when they're its past: the
@@ -384,7 +401,28 @@ impl Ascii {
             origin: origin.map(f32::to_bits),
             textures: [edge_cells.generation, edge_slots.generation],
         };
+        // History a frame capture handed back (#1136): this frame's past
+        // when the key is the captured frame's. Written into this frame's
+        // textures, which the copy below takes as last frame's
+        if let Some((h, part)) = imported.and_then(|h| h.used_part("edges").map(|p| (h, p))) {
+            match crate::stylize::history::key_difference(&part.key, &key.exported()) {
+                Some(why) => h.say(format!(
+                    "ascii: the captured edge history was another frame's ({why}): edges drawn fresh"
+                )),
+                None => match h
+                    .write(frame.queue, part, "cells", &edge_cells.texture)
+                    .and_then(|()| h.write(frame.queue, part, "slots", &edge_slots.texture))
+                {
+                    Ok(()) => {
+                        past.last = Some((key.clone(), frame.frame.wrapping_sub(1)));
+                        h.say("ascii: edge history taken from the capture");
+                    }
+                    Err(why) => h.say(format!("ascii: edge history not taken: {why}")),
+                },
+            }
+        }
         let history = past.advance(key, frame.frame, frame.option("temporal") != "off");
+        past.used = history;
         let EdgePast { cells, slots, .. } = &mut *past;
         let past_cells = Owned::ensure(
             cells,
@@ -437,7 +475,7 @@ impl Ascii {
                 outlines.map_or(u64::MAX, |o| o.generation),
             ]),
             || {
-                frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                     label: Some("ASCII Past Cells And Outlines BG"),
                     layout: &self.past_outline_bgl,
                     entries: &[
@@ -471,7 +509,7 @@ impl Ascii {
             smoothing: edge_smoothing(frame.param("smoothing"), frame.dt),
             _pad: 0,
         };
-        frame.queue.write_buffer(
+        frame.queue.write_buffer_counted(
             &self.edge_cell_uniforms,
             0,
             bytemuck::bytes_of(&cell_uniforms),
@@ -487,7 +525,7 @@ impl Ascii {
             size: [frame.width as f32, frame.height as f32],
             _pad: [0; 2],
         };
-        frame.queue.write_buffer(
+        frame.queue.write_buffer_counted(
             &self.edge_thin_uniforms,
             0,
             bytemuck::bytes_of(&thin_uniforms),
@@ -504,7 +542,7 @@ impl Ascii {
                 &self.picture_bind(frame, input, false),
                 &past_and_outlines,
             ],
-            regions.map(|r| r.edge_cells),
+            kept_cells,
         );
 
         // The glyph each cell draws (#910), decided here once a cell
@@ -533,7 +571,7 @@ impl Ascii {
             "ASCII Edge Thin Inputs BG",
             bind_key(&[past_slots.generation, frame.mask.is_some() as u64]),
             || {
-                frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                     label: Some("ASCII Edge Thin Inputs BG"),
                     layout: &self.thin_in_bgl,
                     entries: &[
@@ -563,6 +601,18 @@ impl Ascii {
             &self.edge_corner_pipeline,
             &[&thin.bind, &edge_cells.bind, &thin_uniform, &past_slots.bind],
         );
+        // For a frame capture (#1161): what the edge passes wrote, and the
+        // history they read when it followed on
+        if let Some(target) = outlines {
+            self.held.note("ascii.edge_outlines", &target.texture);
+        }
+        self.held.note("ascii.edge_cells", &edge_cells.texture);
+        self.held.note("ascii.edge_thin", &thin.texture);
+        self.held.note("ascii.edge_slots", &edge_slots.texture);
+        if history {
+            self.held.note("ascii.edge_cells.past", &past_cells.texture);
+            self.held.note("ascii.edge_slots.past", &past_slots.texture);
+        }
     }
 
     /// The edge debug view (#349): the edge pixels by source and each
@@ -599,7 +649,7 @@ impl Ascii {
         };
         frame
             .queue
-            .write_buffer(&self.edge_view_uniforms, 0, bytemuck::bytes_of(&uniforms));
+            .write_buffer_counted(&self.edge_view_uniforms, 0, bytemuck::bytes_of(&uniforms));
         let cells = frame.bind(
             "ASCII Edge View Cells BG",
             bind_key(&[
@@ -608,7 +658,7 @@ impl Ascii {
                 outlines.map_or(u64::MAX, |o| o.generation),
             ]),
             || {
-                frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                     label: Some("ASCII Edge View Cells BG"),
                     layout: &self.edge_view_cells_bgl,
                     entries: &[
@@ -696,6 +746,9 @@ impl Ascii {
             &self.stats_resolve_pipeline,
             &[uniform, &rows.bind],
         );
+        self.held.note("ascii.stats.runs", &runs.texture);
+        self.held.note("ascii.stats.rows", &rows.texture);
+        self.held.note("ascii.stats", &stats.texture);
     }
 
     /// The picture and (while any per-entity variant is drawn) the mask,
@@ -709,7 +762,7 @@ impl Ascii {
         let mask = frame.mask.filter(|_| with_mask);
         let key = input.id * 2 + mask.is_some() as u64;
         frame.bind("ASCII Stats In BG", key, || {
-            frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("ASCII Stats In BG"),
                 layout: &self.stats_in_bgl,
                 entries: &[
@@ -804,7 +857,7 @@ impl Ascii {
         if stale {
             let atlases: Vec<_> = in_use.sets.iter().map(|s| &**s.atlas()).collect();
             let gpu = GpuGlyphStack::upload(frame.device, frame.queue, &atlases, "ASCII Atlas");
-            let bind = frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let bind = frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("ASCII Atlas BG"),
                 layout: &self.atlas_bgl,
                 entries: &[wgpu::BindGroupEntry {
@@ -823,6 +876,29 @@ impl Ascii {
 }
 
 impl StylePass for Ascii {
+    /// Its cells' tone and edge history (#277, #477) advance a frame each
+    /// draw, so a second draw in one frame isn't a repeat (#1317)
+    fn keeps_history(&self) -> bool {
+        true
+    }
+
+    /// Its edge cells and their history, tone statistics, variant cells,
+    /// snap owners and dissolve state, which it holds itself (#1161)
+    fn held_targets(&self) -> Option<&crate::stylize::HeldTargets> {
+        Some(&self.held)
+    }
+
+    fn glyph_atlas_bytes(&self) -> u64 {
+        // `try_lock`: a frame encoding on another thread holds it, and a
+        // report never waits for a frame (a missed reading counts 0)
+        self.fonts.try_lock().ok().map_or(0, |fonts| {
+            fonts
+                .stack
+                .as_ref()
+                .map_or(0, |s| crate::gpu_counts::bytes_of(&s.gpu.texture))
+        })
+    }
+
     fn encode(
         &self,
         frame: &StyleFrame<'_>,
@@ -830,6 +906,8 @@ impl StylePass for Ascii {
         input: &StyleInput<'_>,
         output: &wgpu::TextureView,
     ) {
+        // History a frame capture handed back (#1136), for this frame only
+        let imported = self.imported.take();
         let mut fonts = self.fonts.lock().unwrap_or_else(|e| e.into_inner());
         let ramp_name = frame.option("ramp").to_string();
         self.refresh_fonts(frame, &mut fonts);
@@ -893,6 +971,8 @@ impl StylePass for Ascii {
         };
         let bands = assign_bands(&mut variants, size, min_footprint);
         let snapping = snap_grids(&variants);
+        // Each snapping grid's band of cells (#929)
+        let owner_bands = assign_owner_bands(&mut variants, size);
         // Each dissolving variant's band of cells (#398)
         let dissolving = assign_dissolve(&mut variants, size);
         report_left_out(frame, &variants, &slots, &snapping, dissolving.len());
@@ -908,9 +988,12 @@ impl StylePass for Ascii {
             .chain([cell])
             .map(|c| c[0].max(c[1]))
             .fold(0.0f32, f32::max);
-        let glyph_rect = frame
-            .styled_rect((2.0 * reach).ceil() as u32)
-            .filter(|_| frame.debug_mode != crate::DebugMode::StyleEdges);
+        let glyph_pad = (GLYPH_RECT_CELLS as f32 * reach).ceil() as u32;
+        let edge_view = frame.debug_mode == crate::DebugMode::StyleEdges;
+        let glyph_rect = frame.styled_rect(glyph_pad).filter(|_| !edge_view);
+        // Where the edge cells are kept (#930): the glyph rect's, scissor
+        // or not, so a cell's edge history is the same either way
+        let edge_area = frame.styled_area(glyph_pad).filter(|_| !edge_view);
         // Where the mask can hold any variant's id, opt-outs too (#507): a
         // pixel further than a cell from it asks no grid of the mask, so a
         // whole frame over a few props reads the mask only near them
@@ -952,7 +1035,6 @@ impl StylePass for Ascii {
             self.upload_table(frame, &variants, &slots);
         // The edge debug view (#349) runs the edge passes even with the
         // glyphs' edges off, and draws them in place of the glyphs
-        let edge_view = frame.debug_mode == crate::DebugMode::StyleEdges;
         if edges > 0.0 || edge_view {
             self.encode_edges(
                 frame,
@@ -962,7 +1044,8 @@ impl StylePass for Ascii {
                 cell,
                 [&uniform, &edge_table],
                 variants.len(),
-                glyph_rect,
+                [glyph_rect, edge_area],
+                imported.as_ref(),
             );
         }
         if edge_view {
@@ -1004,8 +1087,38 @@ impl StylePass for Ascii {
         };
         let temporal = frame.option("temporal") != "off";
         let reproject = frame.option("temporal") == "reproject";
-        let past = history.advance(key, frame.frame, temporal) && !fresh;
+        // History a frame capture handed back (#1136): last frame's cells
+        // and depths, and its camera, when the key is the captured frame's
+        let mut taken = false;
+        if let Some((h, part)) = imported.as_ref().and_then(|h| h.used_part("tone").map(|p| (h, p))) {
+            let read = 1 - history.parity;
+            let cells = history.textures.as_ref().expect("adopted above")[read].clone();
+            let depth = history.depths.as_ref().expect("adopted above")[read].clone();
+            match crate::stylize::history::key_difference(&part.key, &key.exported()) {
+                Some(why) => h.say(format!(
+                    "ascii: the captured tone history was another frame's ({why}): drawn fresh"
+                )),
+                None => match h
+                    .write(frame.queue, part, "cells", &cells.texture)
+                    .and_then(|()| h.write(frame.queue, part, "depths", &depth.texture))
+                {
+                    Ok(()) => {
+                        history.last = Some((key.clone(), frame.frame.wrapping_sub(1)));
+                        if let Some(m) = part.values.get("view_proj").filter(|m| m.len() == 16) {
+                            history.last_view_proj =
+                                Some(std::array::from_fn(|c| std::array::from_fn(|r| m[c * 4 + r])));
+                        }
+                        taken = true;
+                        h.say("ascii: tone history taken from the capture");
+                    }
+                    Err(why) => h.say(format!("ascii: tone history not taken: {why}")),
+                },
+            }
+        }
+        let past = history.advance(key, frame.frame, temporal) && (!fresh || taken);
         let prev_view_proj = history.swap_view_proj(frame.camera.view_proj);
+        history.used_past = past;
+        history.used_view_proj = prev_view_proj;
         let (write, read) = (history.parity, 1 - history.parity);
         history.parity = read;
         let generation = history.generation;
@@ -1074,6 +1187,7 @@ impl StylePass for Ascii {
             dissolve: [[0; 4]; MAX_DISSOLVE],
             ramp_tone: [[EQUAL_BANDS; 4]; MAX_RAMP / 4],
             mask_rect: rect_corners(mask_rect, size),
+            snap_bands: [[0; 4]; MAX_SNAP_GRIDS],
         };
         let mut uniforms = uniforms;
         // Every font the frame draws in, stacked; the whole frame's is at
@@ -1095,10 +1209,11 @@ impl StylePass for Ascii {
             uniforms.band_rows[i] = [b.row, b.rows, b.cols, b.footprint.to_bits()];
         }
         uniforms.snap_grids[..snapping.len()].copy_from_slice(&snapping);
+        uniforms.snap_bands = snap_bands(&snapping, &owner_bands);
         uniforms.dissolve[..dissolving.len()].copy_from_slice(&dissolving);
         frame
             .queue
-            .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
+            .write_buffer_counted(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
         let variant = |i: usize| generation * 2 + i as u64;
 
         // Tone statistics (#289): each slot's luminance range, from this
@@ -1119,7 +1234,7 @@ impl StylePass for Ascii {
         // Cell pass: each cell's colour and glyph, from the picture and
         // (when it follows on) last frame's cells
         let past_bind = frame.depth_bind("ASCII History BG", variant(read), || {
-            frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("ASCII History BG"),
                 layout: &self.history_bgl,
                 entries: &[
@@ -1197,6 +1312,33 @@ impl StylePass for Ascii {
                 &[&uniform, &self.picture_bind(frame, input, true)],
                 Some(&rects),
             );
+            self.held.note("ascii.variant_cells.a", &variant_cells[0].texture);
+            self.held.note("ascii.variant_cells.b", &variant_cells[1].texture);
+        }
+
+        // Snap owners (#929): which snapping variant holds each cell of each
+        // snapping grid, once a cell rather than in each of its pixels
+        let mut snap_owner_slot = self.snap_owners.lock().unwrap_or_else(|e| e.into_inner());
+        let owner_size = owner_texture_size(&owner_bands, snap_owner_slot.as_ref().map(|o| o.size));
+        let snap_owners = Owned::ensure(
+            &mut snap_owner_slot,
+            frame.device,
+            "ASCII Snap Owners",
+            SNAP_OWNER_FORMAT,
+            owner_size,
+            &self.cells_bgl,
+        );
+        if !owner_bands.is_empty() {
+            let draws: Vec<_> = owner_bands.iter().map(|b| (b.rect(), b.slot)).collect();
+            kit::fullscreen_pass_instances_in(
+                encoder,
+                "ASCII Snap Owners",
+                &snap_owners.view,
+                &self.snap_owner_pipeline,
+                &[&uniform, &self.picture_bind(frame, input, true)],
+                &draws,
+            );
+            self.held.note("ascii.snap_owners", &snap_owners.texture);
         }
 
         // The dissolve (#398): each dissolving variant's cells' order, then
@@ -1235,6 +1377,8 @@ impl StylePass for Ascii {
                 &self.dissolve_rank_pipeline,
                 &[&uniform, &dissolve_order.bind],
             );
+            self.held.note("ascii.dissolve.order", &dissolve_order.texture);
+            self.held.note("ascii.dissolve.ranks", &dissolve_ranks.texture);
         }
 
         // Glyph pass: draw the cells
@@ -1264,6 +1408,7 @@ impl StylePass for Ascii {
             stats,
             variant_cells,
             dissolve_ranks,
+            snap_owners,
         );
         let groups = [&*uniform, &*cells, &font.bind, &*entity];
         let input_bind = frame.sampled_input("ASCII Input BG", &self.input_bgl, input);
@@ -1357,6 +1502,52 @@ impl StylePass for Ascii {
             r.rescaled(size, frame.depth_size)
                 .padded(2, frame.depth_size[0], frame.depth_size[1])
         })
+    }
+
+    /// The tone cells and their depths, and the edge cells and slots,
+    /// last frame's as the captured frame read them (#1136): textures the
+    /// frame read and never wrote, so after it they still hold its past.
+    fn export_history(&self, out: &mut crate::stylize::history::HistoryExport<'_>) {
+        let history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some((key, drawn)), Some(cells), Some(depths)) =
+            (&history.last, &history.textures, &history.depths)
+        {
+            if *drawn == out.frame {
+                // The frame flipped the parity to the side it read
+                let read = history.parity;
+                let view_proj: Vec<f32> =
+                    history.used_view_proj.iter().flatten().copied().collect();
+                out.part(
+                    "tone",
+                    key.exported(),
+                    history.used_past,
+                    [("view_proj".to_string(), view_proj)].into(),
+                    &[
+                        ("cells", &cells[read].texture),
+                        ("depths", &depths[read].texture),
+                    ],
+                );
+            }
+        }
+        drop(history);
+        let past = self.edge_past.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some((key, drawn)), Some(cells), Some(slots)) =
+            (&past.last, &past.cells, &past.slots)
+        {
+            if *drawn == out.frame {
+                out.part(
+                    "edges",
+                    key.exported(),
+                    past.used,
+                    Default::default(),
+                    &[("cells", &cells.texture), ("slots", &slots.texture)],
+                );
+            }
+        }
+    }
+
+    fn import_history(&self, history: crate::stylize::history::ImportedHistory) {
+        self.imported.put(history);
     }
 
     fn set_text_capture(&self, on: bool) {

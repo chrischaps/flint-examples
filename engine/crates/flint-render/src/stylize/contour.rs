@@ -17,6 +17,7 @@
 //! field, `boil` re-decides on each drawing of the field where a line runs,
 //! how wide it is and how hard the pen pressed; at 0 none of that runs.
 
+use crate::gpu_counts::{CountedDevice, CountedQueue};
 use super::kit;
 use super::{
     StyleDescriptor, StyleDevice, StyleFrame, StyleInput, StyleNeed, StyleParam,
@@ -113,7 +114,8 @@ struct Contour {
     scene_bgl: wgpu::BindGroupLayout,
     depth_bgl: wgpu::BindGroupLayout,
     uniforms: wgpu::Buffer,
-    /// Depth is read by the nearest texel. One kept bind group holds it,
+    /// Depth and the shared edges are read by the nearest texel (the
+    /// edges through it since #1257). One kept bind group holds it,
     /// bound once a frame, so the DX12 sampler heap is safe.
     depth_sampler: wgpu::Sampler,
     /// Bound if the shared edge pass couldn't be built: one texel of no edge.
@@ -152,7 +154,7 @@ impl Contour {
         let pipeline = kit::fullscreen_pipeline(
             device,
             "Contour Pipeline",
-            &kit::shader(device, "Contour Shader", kit::wgsl!("prelude_core.wgsl", "edges_read.wgsl", "contour.wgsl")),
+            &kit::shader(device, "Contour Shader", kit::wgsl!("prelude_core.wgsl", "noise.wgsl", "edges_read.wgsl", "contour.wgsl")),
             &[&uniform_bgl, &scene_bgl, &depth_bgl],
             HDR_FORMAT,
         );
@@ -164,7 +166,7 @@ impl Contour {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
-        let no_edges = device.create_texture(&wgpu::TextureDescriptor {
+        let no_edges = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some("Contour No Edges"),
             size: wgpu::Extent3d {
                 width: 1,
@@ -209,11 +211,11 @@ impl StylePass for Contour {
         );
         frame
             .queue
-            .write_buffer(&self.uniforms, 0, bytemuck::cast_slice(&[uniforms]));
+            .write_buffer_counted(&self.uniforms, 0, bytemuck::cast_slice(&[uniforms]));
         // Kept over the edges themselves (#960)
         let over = [frame.edges_or(&self.no_edges_view)];
         let depth = frame.depth_bind_over("Contour Depth BG", 0, &over, || {
-            frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
                 label: Some("Contour Depth BG"),
                 layout: &self.depth_bgl,
                 entries: &[

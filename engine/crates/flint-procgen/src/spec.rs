@@ -703,6 +703,24 @@ pub enum Stagger {
     PerBranch,
 }
 
+impl Stagger {
+    /// The name a spec or a scene knows it by.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Stagger::None => "none",
+            Stagger::PerLevel => "per_level",
+            Stagger::PerBranch => "per_branch",
+        }
+    }
+
+    /// A stagger by the name a spec or a scene knows it by.
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Stagger::None, Stagger::PerLevel, Stagger::PerBranch]
+            .into_iter()
+            .find(|stagger| stagger.name() == name)
+    }
+}
+
 /// `[living] variance` (#229): how much of the difference between poses is
 /// left, and where on the tree.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -796,9 +814,17 @@ impl ProcGenSpec {
         Ok(spec)
     }
 
-    /// Load a spec from a TOML file.
+    /// Load a spec from a TOML file. A terrain editor's `x.terrain.toml`
+    /// loads as the `terrain_v1` spec it is (#1168,
+    /// [`crate::generators::terrain::from_terrain_toml`]).
     pub fn from_file(path: &Path) -> Result<Self> {
         let content = vfs::read_to_string(path)?;
+        if path
+            .to_str()
+            .is_some_and(crate::generators::terrain::is_terrain_spec)
+        {
+            return crate::generators::terrain::from_terrain_toml(&content);
+        }
         Self::parse(&content)
     }
 

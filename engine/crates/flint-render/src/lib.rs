@@ -5,6 +5,16 @@
 //! physically-based Cook-Torrance shading. Supports GPU vertex skinning
 //! for skeletal animation.
 
+// The lib's GPU unit tests share one device through the harness the
+// integration binaries use (#1275): a device per test hung this binary in
+// device creation (#598's loader-lock deadlock). The harness names the
+// crate as they do, hence the alias.
+#[cfg(test)]
+extern crate self as flint_render;
+#[cfg(test)]
+#[path = "../tests/shared_gpu/mod.rs"]
+mod shared_gpu;
+
 pub mod atlas;
 pub(crate) mod billboard_pipeline;
 pub mod bind_cache;
@@ -21,6 +31,7 @@ pub mod frame_replay;
 mod frame_taps;
 pub mod frustum;
 pub mod glyph_atlas;
+pub mod gpu_counts;
 pub mod gpu_labels;
 mod gpu_mesh;
 pub mod gpu_select;
@@ -38,8 +49,10 @@ pub mod orbit_controller;
 pub mod palette;
 pub mod panels;
 pub(crate) mod particle_pipeline;
+pub mod pass_knobs;
 mod pipeline;
 pub mod pipeline_cache;
+pub mod pipeline_twins;
 pub mod post_style;
 pub mod postprocess;
 mod primitives;
@@ -50,7 +63,6 @@ pub mod render_stats;
 mod scene_renderer;
 pub(crate) mod selection_outline;
 pub(crate) mod shadow;
-pub mod shallow_wooze;
 pub(crate) mod skinned_pipeline;
 pub(crate) mod sky_pipeline;
 pub(crate) mod skybox_pipeline;
@@ -72,16 +84,17 @@ pub use atlas::{AtlasRegistry, TextureAtlas};
 pub use bind_cache::{DepthKey, DepthTarget};
 pub use bitmap_font::{anchor_origin, apply_fill, BitmapFont};
 pub use camera::{Camera, CameraMode};
-pub use context::{resolve_present_mode, RenderContext, RenderError};
+pub use context::{resolve_present_mode, PresentOptions, RenderContext, RenderError, Vsync};
 pub use debug::{DebugMode, DebugState};
 pub use frustum::Frustum;
 pub use glyph_atlas::{
     EdgeGlyphs, GlyphAtlas, GlyphError, GlyphRamp, GlyphSet, GlyphSetCache, GpuGlyphAtlas, RampMap,
 };
-pub use gpu_mesh::{GpuMesh, GpuSkinnedMesh, MeshCache};
+pub use gpu_mesh::{GpuMesh, GpuSkinnedMesh, MeshCache, KEPT_GEOMETRY_LABEL};
 pub use gpu_select::{list_adapters, no_adapter_hint, set_gpu_override};
 pub use gpu_timer::{
-    GpuPassTime, GpuScope, GpuSpread, GpuTimer, GpuTimings, PassSpread, TracedGpuFrame, TracedPass,
+    GpuFrameTime, GpuPassTime, GpuScope, GpuSpread, GpuTimer, GpuTimings, PassSpread,
+    TimestampHealth, TracedGpuFrame, TracedPass, TIMESTAMPS_UNAVAILABLE,
 };
 pub use gpu_wait::{gpu_wait_timeout, wait_for_gpu};
 pub use grass_pipeline::{GrassEntityPosition, GrassGround, GrassHeight, GrassInstanceGpu};
@@ -90,6 +103,7 @@ pub use headless::HeadlessContext;
 pub use ocean_pipeline::{OceanTint, OceanVisuals};
 pub use orbit_controller::OrbitCameraController;
 pub use particle_pipeline::{ParticleBlendMode, ParticleDrawData, ParticleInstance};
+pub use pass_knobs::PassKnobs;
 pub use pipeline::LightUniforms;
 pub use postprocess::{post_process_config_from_def, PostProcessConfig, HDR_FORMAT};
 pub use primitives::{
@@ -102,9 +116,9 @@ pub use render_scale::{clamp_render_scale, scaled_size, MIN_RENDER_SCALE};
 pub use render_stats::{format_count, RenderStats};
 pub use scene_renderer::{
     load_grass_ground_in, load_scene_grass_ground, load_scene_particle_textures,
-    load_scene_splines, BoundGrass, BoundScene, DrawControls, DrawLimit, FrameHost, FrameInputs,
-    HeldFrameCapture, LightingLevers, LoadedGrassGround, LoadedSplines, LoadedTerrain, LodSettings,
-    RendererConfig, SceneBinding, SceneRenderer, SplineCollider, SteppedPass, View2d,
+    load_scene_splines, BoundGrass, BoundScene, DrawControls, DrawLimit, DrawTimesRead, FrameHost,
+    FrameInputs, HeldFrameCapture, LightingLevers, LoadedGrassGround, LoadedSplines, LoadedTerrain,
+    LodSettings, RendererConfig, SceneBinding, SceneRenderer, SplineCollider, SteppedPass, View2d,
     DEFAULT_CLEAR_COLOR,
 };
 /// The most bones one skinned mesh's buffer holds.
@@ -114,7 +128,7 @@ pub use split_view::SplitView;
 
 pub use style_mask::{StyleIds, STYLE_MASK_FORMAT};
 pub use surface_frame::{AcquireFrame, SurfaceError};
-pub use texture_cache::{memoize_mip_chains, open_image, TextureCache};
+pub use texture_cache::{memoize_mip_chains, open_image, TextureCache, KEPT_TEXTURE_LABEL};
 pub use trusted_shader::TrustedShader;
 pub use water_body::{river_points, RiverPoint, WaterBodyLook, WaterBodyMesh, WaterVertex};
 pub use wooze_pipeline::{ShallowWoozeDraw, WAVELENGTH_MIN};
@@ -125,6 +139,55 @@ pub use world_line_pipeline::DEPTH_SLACK as WORLD_LINE_DEPTH_SLACK;
 
 #[cfg(test)]
 mod tests {
+    /// The lib's tests take the binary's one device (#1275): only the two
+    /// hosts' contexts ask for a device, and nothing here makes a
+    /// `HeadlessContext` (each is a device of its own). A device per test
+    /// hung this binary in `vkCreateDevice` against a thread's exit (#598).
+    #[test]
+    #[allow(clippy::disallowed_methods)] // a test reading the crate's own source tree
+    fn only_the_hosts_contexts_make_a_device() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        // Spelled in pieces so this file doesn't find itself
+        let asks = [
+            format!(".{}(", "request_device"),
+            format!("HeadlessContext::{}(", "new"),
+            format!("HeadlessContext::{}(", "with_features"),
+        ];
+        let mut found = Vec::new();
+        for file in &files {
+            let name = file
+                .strip_prefix(&src)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(file).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let host = matches!(name.as_str(), "context.rs" | "headless.rs");
+                if asks.iter().any(|a| line.contains(a.as_str())) && !host {
+                    found.push(format!("src/{name}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "a lib test takes `crate::shared_gpu::lease()` (#1275), not a device \
+             of its own:\n{}",
+            found.join("\n")
+        );
+    }
+
     #[test]
     fn shader_wgsl_parses_and_validates() {
         let source = crate::wgsl_sources::SCENE;
@@ -176,11 +239,12 @@ mod tests {
         for source in [
             concat!(
                 include_str!("stylize/prelude_core.wgsl"),
+                include_str!("stylize/noise.wgsl"),
                 include_str!("stylize/edges_read.wgsl"),
                 include_str!("stylize/contour.wgsl")
             ),
             concat!(
-                include_str!("stylize/prelude_core.wgsl"),
+                include_str!("stylize/noise.wgsl"),
                 include_str!("stylize/kuwahara.wgsl")
             ),
         ] {
@@ -196,7 +260,7 @@ mod tests {
 
     #[test]
     fn shadow_shader_wgsl_parses() {
-        let source = include_str!("shadow_shader.wgsl");
+        let source = crate::wgsl_sources::SHADOW;
         naga::front::wgsl::parse_str(source).expect("shadow_shader.wgsl failed to parse");
     }
 
@@ -214,7 +278,7 @@ mod tests {
 
     #[test]
     fn particle_shader_wgsl_parses_and_validates() {
-        let source = include_str!("particle_shader.wgsl");
+        let source = crate::wgsl_sources::PARTICLE;
         let module =
             naga::front::wgsl::parse_str(source).expect("particle_shader.wgsl failed to parse");
         naga::valid::Validator::new(
@@ -255,7 +319,7 @@ mod tests {
 
     #[test]
     fn skinned_wire_shader_wgsl_parses() {
-        let source = include_str!("skinned_wire_shader.wgsl");
+        let source = crate::wgsl_sources::WIRE;
         naga::front::wgsl::parse_str(source).expect("skinned_wire_shader.wgsl failed to parse");
     }
 
@@ -437,12 +501,13 @@ mod tests {
     #[test]
     fn shadow_uniforms_layout() {
         // ShadowUniforms is declared once in WGSL, lights.wgsl (#738); the
-        // PCSS vec4 (ADR 0057) grew it 208 → 224 bytes, and the spot's
-        // matrix and vec4 (ADR 0124) to 304.
+        // PCSS vec4 (ADR 0057) grew it 208 → 224 bytes, the spot's
+        // matrix and vec4 (ADR 0124) to 304, and the point light's six face
+        // matrices and two vec4s (ADR 0132) to 720.
         let size = std::mem::size_of::<crate::shadow::ShadowUniforms>();
         assert_eq!(size % 16, 0, "ShadowUniforms not 16-byte aligned");
         assert_eq!(
-            size, 304,
+            size, 720,
             "ShadowUniforms size changed — update lights.wgsl"
         );
         assert_eq!(
@@ -450,6 +515,28 @@ mod tests {
             224,
             "the spot's fields follow `pcss`"
         );
+        assert_eq!(
+            std::mem::offset_of!(crate::shadow::ShadowUniforms, point_view_proj),
+            304,
+            "the point light's fields follow the spot's"
+        );
+    }
+
+    #[test]
+    fn shadow_uniforms_default_point_is_off() {
+        use bytemuck::Zeroable;
+        // point.w = 0 lights every point light as before (#1112)
+        assert_eq!(crate::shadow::ShadowUniforms::default().point, [0.0; 4]);
+        assert_eq!(crate::shadow::ShadowUniforms::zeroed().point, [0.0; 4]);
+    }
+
+    #[test]
+    fn point_shadow_mark_rides_the_old_pad() {
+        // `PointLight::shadow` is the former `_pad0`: the struct stays 48 bytes
+        use crate::pipeline::PointLight;
+        assert_eq!(std::mem::size_of::<PointLight>(), 48);
+        assert_eq!(std::mem::offset_of!(PointLight, shadow), 36);
+        assert_eq!(PointLight::default().shadow, 0.0);
     }
 
     #[test]

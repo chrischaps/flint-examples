@@ -4,14 +4,17 @@
 //! (`flint-player` through [`PlayerCli`], which adds `--bundle`), so a flag
 //! added here reaches both and a scene plays the same under either.
 //!
-//! The web player (`bin/flint_web.rs`, from its page's query) and Android
-//! (`flint-android`, from its profile) build their `PlayerApp` from their
-//! own sources; what they share with this is `PlayerApp::apply_scene_settings`
-//! and [`PlayerApp::step_frames`].
+//! The flags the web player (`bin/flint_web.rs`, from its page's query) and
+//! Android (`flint-android`, from its profile) offer too are read into a
+//! [`PlayOptions`](crate::PlayOptions) ([`PlayerArgs::options`]), as theirs
+//! are, and set on the app by the one `PlayOptions::apply` (#1142); what
+//! else the hosts share is `PlayerApp::apply_scene_settings`.
 
 use crate::PlayerApp;
 use anyhow::{Context, Result};
 use flint_core::bundle::Bundle;
+use flint_core::frame_notes::NoteKind;
+use flint_core::load_report::{self, LoadKind, Stage};
 use flint_core::vfs;
 use flint_scene::load_scene;
 use flint_schema::SchemaRegistry;
@@ -72,8 +75,9 @@ pub struct PlayerArgs {
     /// Quality settings as `key=value,...`, applied over --msaa and
     /// --render-scale (FlintKart#55). Keys: render_scale, render_scale_auto,
     /// msaa, shadows, shadow_resolution, shadow_cascades, shadow_distance,
-    /// post_process, bloom, ssao, ssao_samples, fog, volumetric. Scripts
-    /// change them while running with set_quality()
+    /// post_process, bloom, ssao, ssao_samples, fog, volumetric, lod_scale,
+    /// draw_distance_scale. Scripts change them while running with
+    /// set_quality()
     #[arg(long, value_name = "KEY=VALUE,...")]
     pub quality: Option<String>,
 
@@ -132,9 +136,18 @@ pub struct PlayerArgs {
     #[arg(long)]
     pub list_keys: bool,
 
-    /// With --list-keys: the table as JSON
-    #[arg(long, requires = "list_keys")]
+    /// With --list-keys: the table as JSON. Not a flag here (#1184): each
+    /// binary sets it from its own `--json`, `flint-player`'s from
+    /// `PlayerCli::json` and `flint play`'s from flint's global one, which
+    /// a flag of the same name flattened in would take from it
+    #[arg(skip)]
     pub json: bool,
+
+    /// `--vsync off|mailbox|fifo`, `--frame-latency 1..3` and
+    /// `--no-pacing`: how frames reach the display (#1149), over
+    /// FLINT_VSYNC, FLINT_FRAME_LATENCY and FLINT_PACING
+    #[command(flatten)]
+    pub present: crate::PresentArgs,
 
     /// `--width`/`--height`, `--position`, `--borderless`, `--always-on-top`
     /// and `--no-activate`: the window's size and place, its frame, whether
@@ -296,6 +309,11 @@ pub struct PlayerArgs {
     #[command(flatten)]
     pub hitches: crate::HitchArgs,
 
+    /// `--perf-report FILE`: the `--exit-after` report as JSON, for
+    /// `scripts/perf-compare.py` (#1093)
+    #[command(flatten)]
+    pub perf_report: crate::PerfReportArgs,
+
     /// `--capture-frame-at SECS` (repeatable), `--capture-on-hitch[=N]`
     /// (past the start; `--capture-on-hitch-startup` for the first 2 s too,
     /// #1207) and `--capture-dir DIR`: frames for the frame debugger, as
@@ -314,6 +332,16 @@ pub struct PlayerArgs {
     /// (#1097). Shift+F3 saves one mid-play
     #[command(flatten)]
     pub trace: crate::TraceArgs,
+
+    /// `--load-report`: where each load's time went, a table a load
+    /// (#1092). --perf prints it too
+    #[command(flatten)]
+    pub loads: crate::LoadReportArgs,
+
+    /// `--skip-pass LABEL` and `--repeat-pass LABEL:N`: cost a part of the
+    /// frame on any GPU by taking it away or drawing it N times (#1317)
+    #[command(flatten)]
+    pub pass_knobs: crate::PassKnobArgs,
 
     /// `--log-format text|json` and `--quiet`: how and how much the player
     /// says, which its binary's `main` hands `logging::init` (#716)
@@ -336,13 +364,18 @@ pub struct PlayerCli {
     #[arg(long, value_name = "FILE")]
     pub bundle: Option<PathBuf>,
 
+    /// With --list-keys: the table as JSON
+    #[arg(long, requires = "list_keys")]
+    pub json: bool,
+
     #[command(flatten)]
     pub args: PlayerArgs,
 }
 
 impl PlayerCli {
     /// Play what the command line names, from a bundle or the disk.
-    pub fn run(self) -> Result<()> {
+    pub fn run(mut self) -> Result<()> {
+        self.args.json = self.json;
         match self.bundle {
             Some(bundle) => launch_bundle(self.args, &bundle),
             None => launch(self.args),
@@ -354,11 +387,7 @@ impl PlayerCli {
 /// through: it may be a user style the scene's `styles/` registers (#274),
 /// checked once those are loaded.
 fn parse_style_word(s: &str) -> Result<String, String> {
-    match flint_render::stylize::StyleSpec::parse(s, &flint_render::stylize::StyleRegistry::new()) {
-        Ok(_) => Ok(s.to_string()),
-        Err(e) if e.starts_with("unknown style") => Ok(s.to_string()),
-        Err(e) => Err(e),
-    }
+    crate::play_options::check_style_word(s).map(|()| s.to_string())
 }
 
 /// Play a scene from the disk: the flags' early switches (`--list-gpus`,
@@ -386,6 +415,7 @@ pub struct Prepared {
 }
 
 fn start(args: PlayerArgs, bundle: Option<&Path>) -> Result<()> {
+    let began = web_time::Instant::now();
     if args.list_gpus {
         let adapters = flint_render::list_adapters();
         if adapters.is_empty() {
@@ -414,6 +444,11 @@ fn start(args: PlayerArgs, bundle: Option<&Path>) -> Result<()> {
         return Ok(());
     }
 
+    // The start-up's load report (#1092), from here to the first frame on
+    // screen; its name is the scene's, once it is up
+    if args.loads.wanted(args.perf) {
+        flint_core::load_report::begin_at(LoadKind::Start, "", began);
+    }
     let Prepared {
         mut app,
         late_bundles,
@@ -421,7 +456,7 @@ fn start(args: PlayerArgs, bundle: Option<&Path>) -> Result<()> {
 
     // The controls are said from the scene's own bindings once they are
     // loaded (`PlayerApp::say_controls`, #716), not as a fixed banner here
-    let event_loop = EventLoop::new()?;
+    let event_loop = load_report::timed(Stage::Window, String::new, EventLoop::new)?;
     event_loop.set_control_flow(ControlFlow::Poll);
     if let Some((source, late)) = late_bundles {
         if !late.is_empty() {
@@ -429,6 +464,7 @@ fn start(args: PlayerArgs, bundle: Option<&Path>) -> Result<()> {
         }
     }
 
+    app.awaiting_window();
     event_loop.run_app(&mut app)?;
     // A failed start or a screenshot that never reached the disk exits
     // non-zero, never as a clean run (#639), as does a script error under
@@ -440,6 +476,45 @@ fn start(args: PlayerArgs, bundle: Option<&Path>) -> Result<()> {
 }
 
 impl PlayerArgs {
+    /// The flags' [`PlayOptions`](crate::PlayOptions): what they mean once
+    /// read, the same struct the web's query and Android's profile build
+    /// (#1142). A value that doesn't read is refused, naming its flag.
+    pub fn options(&self) -> Result<crate::PlayOptions> {
+        let mut options = crate::PlayOptions {
+            msaa: self.msaa,
+            styles: self.styles.clone(),
+            look: self.look.clone(),
+            style_time: self.style_time,
+            motion_hold: self.motion_hold,
+            touch_device: self.touch_device,
+            pixels_per_point: self.pixels_per_point,
+            strict_scripts: self.strict_scripts,
+            procgen_defer: self.procgen_defer,
+            save_dir: self.save_dir.clone(),
+            pass_knobs: self.pass_knobs.knobs()?,
+            frame_step: self.frame_step,
+            seed: self.seed,
+            perf: self.perf.then_some(true),
+            ..Default::default()
+        };
+        if let Some(value) = &self.render_scale {
+            options
+                .read_render_scale(crate::RenderScaleSetting::default(), value)
+                .map_err(|e| anyhow::anyhow!("--render-scale {e}"))?;
+        }
+        if let Some(quality) = &self.quality {
+            // Refuse a typo here rather than run with a setting silently dropped.
+            options
+                .read_quality(quality)
+                .map_err(|e| anyhow::anyhow!("--quality: {e}"))?;
+        }
+        options
+            .read_touch_controls(&self.touch_controls)
+            .map_err(|e| anyhow::anyhow!("--touch-controls: {e}"))?;
+        options.safe_area = self.safe_area.as_deref().map(parse_safe_area).transpose()?;
+        Ok(options)
+    }
+
     /// Everything before the window: the bundle (if any), the scene (the
     /// project's default when none is named), its schemas through the one
     /// resolver (ADR 0114), its user styles and the `--style` and `--look`
@@ -456,6 +531,9 @@ impl PlayerArgs {
         let from_bundle = bundle.is_some();
 
         let scene = resolve_scene(args.scene.clone())?;
+        // Schemas, styles, the scene parsed and settled: the load's first
+        // stage (#1092), a frame note no frame hears
+        let read = flint_core::frame_notes::begin(NoteKind::SceneRead, || scene.clone());
         // The one resolver (ADR 0114): --schemas, else the manifest, else
         // discovery. A bundle settled its list when it was packed
         // (`args.schemas` holds it by now), plus what lies beside the scene.
@@ -477,6 +555,15 @@ impl PlayerArgs {
         for warning in schema_dirs.dropped_warnings() {
             tracing::warn!(target: "load", "{warning}");
         }
+        // A package the project lists that this build left out (#1335):
+        // its scenes would play without it, so stop and name `flint build`
+        if let Some(unbuilt) = crate::packages::unbuilt(
+            &schema_dirs,
+            &crate::packages::this_binary(),
+            crate::packages::lacks,
+        ) {
+            return Err(unbuilt.into());
+        }
         if schema_dirs.dirs.is_empty() {
             // The log is stderr: stdout is what a command answers with (#710)
             tracing::warn!(target: "load", "No schemas directories found");
@@ -497,24 +584,9 @@ impl PlayerArgs {
                 .map_err(|e| anyhow::anyhow!("--look: {e}"))?;
             tracing::info!(target: "player", "Look: {} ({})", look.name, look.source);
         }
-        let render_scale = match &args.render_scale {
-            Some(value) => Some(
-                crate::RenderScaleSetting::default()
-                    .parse(value)
-                    .ok_or_else(|| anyhow::anyhow!("--render-scale {value}: a number or auto"))?,
-            ),
-            None => None,
-        };
-        if let Some(quality) = &args.quality {
-            // Refuse a typo here rather than run with a setting silently dropped.
-            let errors = flint_render::QualitySettings::default().apply_str(quality);
-            if let Some(e) = errors.first() {
-                anyhow::bail!("--quality: {e}");
-            }
-        }
-        let touch_mode = flint_runtime::TouchControlsMode::parse(&args.touch_controls)
-            .ok_or_else(|| anyhow::anyhow!("--touch-controls: auto, always or never"))?;
-        let safe_area = args.safe_area.as_deref().map(parse_safe_area).transpose()?;
+        // What the flags the web and Android share mean, each value read
+        // and a bad one refused here (#1142)
+        let options = args.options()?;
         let compare = args.compare.as_deref().map(parse_compare).transpose()?;
         let input_script = args
             .input_script
@@ -549,10 +621,12 @@ impl PlayerArgs {
 
         #[cfg_attr(not(feature = "living"), allow(unused_mut))]
         let (world, mut scene_file) =
-            load_scene(&scene, &registry).context("Failed to load scene")?;
+            load_scene(&scene, &registry).with_context(|| flint_scene::load_failed(&scene))?;
         // Living props' tables: checked, and the preset [wooze] names filled in (#686)
         #[cfg(feature = "living")]
-        flint_procgen::settle_scene(&mut scene_file, scene_path).context("Failed to load scene")?;
+        flint_procgen::settle_scene(&mut scene_file, scene_path)
+            .with_context(|| flint_scene::load_failed(scene_path))?;
+        drop(read);
         // The scene's name and size are said with what it loaded, once it
         // is up (`enter_scene`'s summary). On stderr, so `--list-keys
         // --json`'s stdout is the table alone
@@ -570,42 +644,30 @@ impl PlayerArgs {
             args.input_config.clone(),
             scene_file.scene.input_config.clone(),
         );
+        // Msaa, render scale, quality, styles, touch, frame step and seed,
+        // perf...: what the web and Android set through the same call
+        options.apply(&mut app);
+        // What only the desktop has: a window, sockets and files
         let launch = &mut app.launch;
-        launch.msaa_sample_count = args.msaa;
-        launch.save_dir = args.save_dir.clone();
         // A bundle's files aren't on the disk: nothing to key a disk cache by.
         launch.procgen_disk_cache = !from_bundle;
         launch.scene_file_writable = !from_bundle;
-        if args.procgen_defer {
-            launch.procgen_mode = crate::ProcGenMode::Deferred;
-        }
-        if let Some(scale) = render_scale {
-            launch.render_scale = scale;
-        }
-        if let Some(quality) = &args.quality {
-            launch.quality_overrides = quality.clone();
-        }
-        launch.safe_area = safe_area;
-        launch.touch_device = args.touch_device;
-        launch.strict_scripts = args.strict_scripts;
-        launch.pixels_per_point = args.pixels_per_point.filter(|p| *p > 0.0);
-        launch.look = args.look.clone();
-        launch.style_specs = args.styles.clone();
-        launch.style_time = args.style_time;
-        launch.motion_hold = args.motion_hold;
         launch.window_size = args.window.size();
         launch.window_options = args.window.clone();
+        // How the window presents (#1149): over FLINT_VSYNC and friends
+        args.present.apply(launch);
         launch.expression_feed = expression_feed;
         #[cfg(not(target_arch = "wasm32"))]
         {
             launch.inspect = inspect;
             launch.world_dump = world_dump;
         }
-        app.input.touch_controls_mut().set_mode(touch_mode);
         args.hitches.apply(&mut app)?;
+        args.perf_report.apply(&mut app, args.exit_after)?;
         args.frame_captures.apply(&mut app)?;
         args.record.apply(&mut app)?;
         args.trace.apply(&mut app)?;
+        args.loads.apply(&mut app, args.perf);
         // Skybox, ambient, shading levers, shadows, default lights, camera,
         // user styles and post from the scene file, as every host and
         // transition take them (#723)
@@ -631,10 +693,6 @@ impl PlayerArgs {
                 "[living] --compare {a},{b}: this player is built without the `living` feature"
             );
         }
-        if args.perf {
-            app.enable_perf(true);
-        }
-        app.step_frames(args.frame_step, args.seed);
 
         // The game's buses (#730), then the flags over them: each scales
         // the volume its bus starts at (`--music-volume 0` mutes it)

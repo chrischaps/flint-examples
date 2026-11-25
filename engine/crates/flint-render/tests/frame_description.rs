@@ -5,6 +5,8 @@
 //!
 //! These need a GPU adapter. Without one each test prints a note and passes.
 
+#![allow(clippy::disallowed_methods)] // the test's own targets and read-backs, not the renderer's, so uncounted (#1091)
+
 mod shared_gpu;
 
 use flint_ecs::FlintWorld;
@@ -567,4 +569,178 @@ fn a_replays_draw_limit_on_a_shadow_layer_steps_its_casters_and_no_other_pass() 
     );
     assert_eq!(SteppedPass::from_name("Bloom"), None);
     assert_eq!(step(1).limit_of(SteppedPass::Scene), None);
+}
+
+/// A renderer whose frames skip or repeat parts by label (#1317).
+fn knobbed(gpu: &Gpu, skip: &str, repeat: &str) -> SceneRenderer {
+    let mut knobs = flint_render::PassKnobs::new();
+    knobs.skip_list(skip);
+    knobs.repeat_list(repeat).unwrap();
+    let mut renderer = gpu.renderer();
+    renderer.set_pass_knobs(Some(knobs));
+    renderer
+}
+
+#[test]
+fn a_skipped_part_records_nothing_and_is_described_as_skipped() {
+    let gpu = gpu_or_skip!();
+    let world = world();
+    let mut plain = gpu.renderer();
+    gpu.frame(&mut plain, &world);
+    let lit = gpu.frame(&mut plain, &world);
+
+    // Skipped from the first frame, the shadow map is never drawn (the
+    // fixture's crate casts beside the tile, so no pixel shows it)
+    let mut skipping = knobbed(&gpu, "shadows", "");
+    gpu.frame(&mut skipping, &world);
+    // describe() holds the timed passes to the timer's scopes: a skipped
+    // part opens none
+    let d = describe(&gpu, &mut skipping, &world);
+    let shadows = d.pass("Shadows").unwrap();
+    assert!(!shadows.ran && !shadows.timed);
+    assert_eq!(
+        shadows.skipped.as_deref(),
+        Some("skip_pass names it (#1317)")
+    );
+    assert!(shadows.passes.is_empty(), "a skipped part drew its layers");
+    // Everything else ran as ever
+    assert!(d.pass("Scene").unwrap().ran);
+    assert!(d.pass("Composite").unwrap().ran);
+
+    // Skipping the scene pass leaves the HDR target as wgpu made it, and
+    // the composite still runs over it
+    let mut no_scene = knobbed(&gpu, "Scene", "");
+    let d = describe(&gpu, &mut no_scene, &world);
+    assert!(!d.pass("Scene").unwrap().ran);
+    assert!(d.pass("Composite").unwrap().ran);
+    assert_ne!(gpu.frame(&mut no_scene, &world), lit);
+}
+
+#[test]
+fn a_repeated_part_draws_the_same_picture_and_is_described_once() {
+    let gpu = gpu_or_skip!();
+    let world = world();
+    let mut plain = gpu.renderer();
+    gpu.frame(&mut plain, &world);
+    let once = gpu.frame(&mut plain, &world);
+    let d_once = describe(&gpu, &mut plain, &world);
+
+    // Every part here redraws its targets whole, so three times over is
+    // the same picture: only the work grows
+    let mut thrice = knobbed(&gpu, "", "Scene:3,Shadows:3,SSAO:3,Bloom:3,Composite:3");
+    gpu.frame(&mut thrice, &world);
+    assert_eq!(gpu.frame(&mut thrice, &world), once);
+    let d = describe(&gpu, &mut thrice, &world);
+    let names = |d: &FrameDescription| -> Vec<String> {
+        d.all_passes().into_iter().map(|p| p.name.clone()).collect()
+    };
+    assert_eq!(
+        names(&d),
+        names(&d_once),
+        "a repeat changed the passes listed"
+    );
+    assert_eq!(
+        scene_draws(&d),
+        scene_draws(&d_once),
+        "the scene's draws were listed again"
+    );
+    assert_eq!(casters(&d), casters(&d_once));
+    assert_eq!(
+        d.pass("Shadows").unwrap().passes.len(),
+        d_once.pass("Shadows").unwrap().passes.len()
+    );
+}
+
+#[test]
+fn knobs_set_and_cleared_leave_a_renderer_as_it_was() {
+    let gpu = gpu_or_skip!();
+    let world = world();
+    let mut plain = gpu.renderer();
+    gpu.frame(&mut plain, &world);
+    let once = gpu.frame(&mut plain, &world);
+
+    let mut r = knobbed(&gpu, "Scene", "");
+    assert_eq!(r.pass_knobs().map(|k| k.times("scene")), Some(0));
+    gpu.frame(&mut r, &world);
+    // Empty knobs are none
+    r.set_pass_knobs(Some(flint_render::PassKnobs::new()));
+    assert!(r.pass_knobs().is_none());
+    assert_eq!(r.pass_times("UI", None), 1);
+    gpu.frame(&mut r, &world);
+    assert_eq!(gpu.frame(&mut r, &world), once);
+}
+
+/// Each draw of a pass as (entity, pipeline).
+fn draws_of(d: &FrameDescription, pass: &str) -> Vec<(String, String)> {
+    let p = d
+        .pass(pass)
+        .unwrap_or_else(|| panic!("no {pass} pass in {:?}", d.passes));
+    assert!(p.ran, "{pass} didn't run: {:?}", p.skipped);
+    p.draws
+        .iter()
+        .map(|dr| (dr.entity.clone().unwrap_or_default(), dr.pipeline.clone()))
+        .collect()
+}
+
+/// The passes after the scene that draw a selection of the draw list
+/// (#1151): the style mask, the fog veil and the selection mask each list
+/// their draws by entity, through the selector they draw with, and each
+/// names the pipeline it bound. The picture is the same described or not.
+#[test]
+fn the_mask_veil_and_selection_passes_list_their_draws_by_entity() {
+    let gpu = gpu_or_skip!();
+    let mut world = world();
+    // The crate in glyphs, so the mask draws it and nothing else
+    let crate_id = world.get_id("crate").unwrap();
+    flint_render::entity_style::set_entity_style(
+        &mut world,
+        &flint_render::stylize::StyleRegistry::new(),
+        crate_id,
+        "ascii",
+    )
+    .unwrap();
+    // The tile translucent in fog, so the veil draws it again
+    let tile = world.get_id("in_view").unwrap();
+    let mut glass = toml::Table::new();
+    glass.insert("opacity".into(), 0.4.into());
+    world.set_component(tile, "material", glass.into()).unwrap();
+
+    let make = || {
+        let mut r = gpu.renderer();
+        let mut config = r.post_process_config().clone();
+        config.fog_enabled = true;
+        config.fog_density = 0.05;
+        r.set_post_process_config(config);
+        // The editor's selection: the crate
+        r.set_selected_entity(Some(crate_id));
+        r
+    };
+    let mut plain = make();
+    gpu.frame(&mut plain, &world);
+    let undescribed = gpu.frame(&mut plain, &world);
+
+    let mut renderer = make();
+    gpu.frame(&mut renderer, &world);
+    let d = describe(&gpu, &mut renderer, &world);
+    assert_eq!(gpu.pixels(), undescribed, "describing changed the picture");
+
+    let pair = |e: &str, p: &str| (e.to_string(), p.to_string());
+    assert_eq!(draws_of(&d, "Style mask"), [pair("crate", "style mask")]);
+    assert_eq!(
+        draws_of(&d, "Fog veil"),
+        [pair("in_view", "fog veil mesh (covers)")]
+    );
+    assert_eq!(
+        draws_of(&d, "Selection mask"),
+        [pair("crate", "selection mask")]
+    );
+    // The scene pass names what draw_main bound: the crate opaque, the
+    // tile blended now
+    assert_eq!(
+        draws_of(&d, "Scene"),
+        [
+            pair("crate", "pbr"),
+            pair("in_view", "pbr alpha (back, then front)")
+        ]
+    );
 }

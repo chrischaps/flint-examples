@@ -1748,6 +1748,7 @@ dependencies = [
  "flint-animation",
  "flint-asset",
  "flint-asset-gen",
+ "flint-audio",
  "flint-constraint",
  "flint-core",
  "flint-debug-ui",
@@ -1755,6 +1756,7 @@ dependencies = [
  "flint-geometry",
  "flint-import",
  "flint-input-capture",
+ "flint-living",
  "flint-music",
  "flint-particles",
  "flint-physics",
@@ -1775,6 +1777,7 @@ dependencies = [
  "glam",
  "hound",
  "image",
+ "libc",
  "miniz_oxide",
  "naga",
  "notify",
@@ -1788,6 +1791,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wgpu",
+ "windows-sys 0.61.2",
  "winit",
 ]
 
@@ -1809,6 +1813,7 @@ name = "flint-core"
 version = "0.1.0"
 dependencies = [
  "profiling",
+ "semver",
  "serde",
  "sha2",
  "thiserror 2.0.18",
@@ -1831,7 +1836,6 @@ dependencies = [
  "flint-scene",
  "flint-schema",
  "flint-terrain",
- "flint-wooze",
  "toml",
  "tracing",
  "wgpu",
@@ -1854,6 +1858,7 @@ name = "flint-geometry"
 version = "0.1.0"
 dependencies = [
  "flint-core",
+ "flint-ecs",
  "serde",
  "toml",
 ]
@@ -1887,9 +1892,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "flint-living"
+version = "0.1.0"
+dependencies = [
+ "flint-core",
+ "flint-procgen",
+ "flint-wooze",
+ "tracing",
+ "web-time",
+]
+
+[[package]]
 name = "flint-music"
 version = "0.1.0"
 dependencies = [
+ "flint-audio",
+ "flint-audio-worklet",
  "flint-core",
  "hound",
  "kira",
@@ -1908,6 +1926,8 @@ dependencies = [
  "flint-core",
  "flint-ecs",
  "flint-runtime",
+ "flint-scene",
+ "flint-schema",
  "serde",
  "toml",
  "tracing",
@@ -1923,6 +1943,7 @@ dependencies = [
  "flint-runtime",
  "flint-scene",
  "flint-schema",
+ "flint-terrain",
  "rapier3d",
  "thiserror 2.0.18",
  "toml",
@@ -1955,6 +1976,7 @@ dependencies = [
  "flint-geometry",
  "flint-import",
  "flint-input-capture",
+ "flint-living",
  "flint-music",
  "flint-particles",
  "flint-physics",
@@ -1979,7 +2001,9 @@ dependencies = [
  "rhai",
  "serde",
  "serde_json",
+ "skrifa",
  "toml",
+ "tracelogging",
  "tracing",
  "tracing-subscriber",
  "tracing-wasm",
@@ -2002,6 +2026,7 @@ dependencies = [
  "flint-import",
  "flint-scene",
  "flint-schema",
+ "flint-terrain",
  "flint-wooze",
  "gltf",
  "image",
@@ -2060,7 +2085,6 @@ dependencies = [
  "flint-scene",
  "flint-schema",
  "flint-terrain",
- "flint-wooze",
  "image",
  "libloading",
  "mach-dxcompiler-rs",
@@ -2093,6 +2117,7 @@ dependencies = [
 name = "flint-runtime"
 version = "0.1.0"
 dependencies = [
+ "egui",
  "flint-core",
  "flint-ecs",
  "gilrs",
@@ -2185,6 +2210,7 @@ dependencies = [
  "flint-particles",
  "flint-procgen",
  "flint-render",
+ "flint-runtime",
  "flint-scene",
  "flint-schema",
  "flint-wooze",
@@ -2204,7 +2230,9 @@ name = "flint-wooze"
 version = "0.1.0"
 dependencies = [
  "flint-core",
+ "flint-ecs",
  "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -5673,6 +5701,21 @@ name = "toml_write"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
+
+[[package]]
+name = "tracelogging"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0015caf14cad7613b7bbbb9ee44399ad9a694307be545d8af4e2711178e547e"
+dependencies = [
+ "tracelogging_macros",
+]
+
+[[package]]
+name = "tracelogging_macros"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95e2d891464ff33bc1814c4cbbb251bae7800458b1efdb6ac8b7c01ee6382563"
 
 [[package]]
 name = "tracing"

@@ -3,12 +3,17 @@
 //! state, so its first frame is the bytes a renderer built from nothing
 //! draws, though the first had ASCII's cell history full of another
 //! camera's frames; and a style whose WGSL changed builds a new pipeline
-//! instead of taking the one kept for the old text.
+//! instead of taking the one kept for the old text. A model's or file's
+//! texture and a mesh's vertex and index buffers ride the same cache
+//! (#961): uploaded once a device, keyed by their bytes, and never written
+//! in place while kept.
 //!
 //! A binary of its own, since the cache (like the shader folder the second
 //! test points at) is the process's. Each test switches it holding the
 //! device alone, and its lease puts the harness's setting back (#913).
 //! Needs a GPU adapter; without one each test prints a note and passes.
+
+#![allow(clippy::disallowed_methods)] // the test's own targets and read-backs, not the renderer's, so uncounted (#1091)
 
 mod shared_gpu;
 
@@ -320,4 +325,429 @@ fn a_changed_shader_builds_a_new_pipeline_not_the_kept_one() {
     pipeline_cache::set_enabled(false);
     dev_shader::set_dir(None);
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #961: on WARP each golden case uploaded its scene's textures again, up
+/// to 8 s a case. With the cache on, a second renderer's cache takes the
+/// texture the first one uploaded from the same file; one whose file now
+/// holds other pixels gets a texture of its own; a kept texture refuses
+/// `update_rgba`, whose write would reach every renderer drawing it; and
+/// with the cache off nothing is kept and the write goes through.
+#[test]
+#[allow(clippy::disallowed_methods)] // a test writes its own files to the disk
+fn a_file_texture_is_uploaded_once_a_device_and_never_written_while_kept() {
+    let Some(lease) = shared_gpu::lease_alone() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    let (device, queue) = (&lease.gpu.device, &lease.gpu.queue);
+    let dir =
+        Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("texture_keep_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("probe.png");
+    let paint = |shade: u8| {
+        image::RgbaImage::from_fn(32, 32, |x, y| {
+            image::Rgba([shade, x as u8 * 8, y as u8 * 8, 255])
+        })
+        .save(&file)
+        .unwrap();
+    };
+    let label = flint_render::KEPT_TEXTURE_LABEL;
+    pipeline_cache::set_enabled(true);
+    pipeline_cache::clear();
+    pipeline_cache::reset_counts();
+
+    paint(40);
+    let load = || {
+        let mut cache = flint_render::TextureCache::new(device, queue);
+        cache
+            .load_file_mipmapped(device, queue, "probe", &file)
+            .unwrap();
+        cache
+    };
+    let (first, second) = (load(), load());
+    let texture = |c: &flint_render::TextureCache| c.get("probe").unwrap().texture.clone();
+    assert_eq!(
+        texture(&first),
+        texture(&second),
+        "the second cache uploaded its own"
+    );
+    assert_eq!((count(label).built, count(label).reused), (1, 1));
+    let pixels = vec![0u8; 32 * 32 * 4];
+    let refused = second.update_rgba(queue, "probe", &pixels).unwrap_err();
+    assert!(refused.contains("shared"), "{refused}");
+
+    // Other pixels behind the same name and path: a texture of its own
+    paint(200);
+    let third = load();
+    assert_ne!(
+        texture(&third),
+        texture(&first),
+        "took the old file's texture"
+    );
+    assert_eq!(count(label).built, 2);
+
+    // Off: nothing kept, so the write is the cache's own to make
+    pipeline_cache::set_enabled(false);
+    let own = load();
+    assert_ne!(texture(&own), texture(&third));
+    own.update_rgba(queue, "probe", &pixels).unwrap();
+    assert_eq!(count(label).built, 2, "counted with the cache off");
+
+    pipeline_cache::clear();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #961: an imported mesh's vertex and index buffers ride the cache too
+/// (on WARP the skinned YBot's took 0.57 s a case). A second mesh cache on
+/// the device takes the buffers the first uploaded from the same model,
+/// moved vertices get their own, a procedural mesh is never kept (a host
+/// replaces one at run time), and with the cache off nothing is shared.
+#[test]
+fn a_mesh_is_uploaded_once_a_device_by_its_bytes() {
+    let Some(lease) = shared_gpu::lease_alone() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    let device = &lease.gpu.device;
+    let label = flint_render::KEPT_GEOMETRY_LABEL;
+    pipeline_cache::set_enabled(true);
+    pipeline_cache::clear();
+    pipeline_cache::reset_counts();
+
+    let sphere = flint_import::import_gltf(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/scenes/models/Sphere.glb"),
+    )
+    .unwrap();
+    let mut moved_sphere = sphere.clone();
+    moved_sphere.meshes[0].positions[0][0] += 0.25;
+    let upload = |model: &flint_import::ImportResult| {
+        let mut cache = flint_render::MeshCache::new();
+        cache.upload_imported(device, "probe", model, [1.0; 4]);
+        let mesh = &cache.get("probe").unwrap()[0];
+        (mesh.vertex_buffer.clone(), mesh.index_buffer.clone())
+    };
+    let (first, second) = (upload(&sphere), upload(&sphere));
+    assert!(
+        std::sync::Arc::ptr_eq(&first.0, &second.0),
+        "vertices uploaded twice"
+    );
+    assert!(
+        std::sync::Arc::ptr_eq(&first.1, &second.1),
+        "indices uploaded twice"
+    );
+    let kept = count(label);
+    assert_eq!(kept.reused, kept.built, "{kept:?}");
+
+    // Other vertices: a buffer of their own; the same indices: the kept ones
+    let moved = upload(&moved_sphere);
+    assert!(
+        !std::sync::Arc::ptr_eq(&moved.0, &first.0),
+        "took the other mesh's vertices"
+    );
+    assert!(std::sync::Arc::ptr_eq(&moved.1, &first.1));
+
+    // A procedural mesh: never kept, so replacing one never piles up
+    let before = count(label);
+    let procedural = || {
+        let mut cache = flint_render::MeshCache::new();
+        let v = |x: f32| flint_render::Vertex {
+            position: [x, 0.0, 0.0],
+            normal: [0.0, 1.0, 0.0],
+            color: [1.0; 4],
+            uv: [0.0; 2],
+        };
+        cache.upload_procedural(
+            device,
+            "made",
+            &[v(0.0), v(1.0), v(2.0)],
+            &[0, 1, 2],
+            Default::default(),
+        );
+        cache.get("made").unwrap()[0].vertex_buffer.clone()
+    };
+    assert!(!std::sync::Arc::ptr_eq(&procedural(), &procedural()));
+    assert_eq!(
+        count(label),
+        before,
+        "a procedural mesh went through the cache"
+    );
+
+    pipeline_cache::set_enabled(false);
+    let own = upload(&sphere);
+    assert!(
+        !std::sync::Arc::ptr_eq(&own.0, &first.0),
+        "shared with the cache off"
+    );
+    pipeline_cache::clear();
+}
+
+/// ASCII switched on in `renderer`'s config, as [`ascii`] does.
+fn with_ascii(renderer: &SceneRenderer) -> flint_render::PostProcessConfig {
+    let mut config = renderer.post_process_config().clone();
+    config.styles.set_enabled("ascii", true);
+    config.styles.set_option("ascii", "temporal", "on");
+    config
+}
+
+/// A renderer with no style on.
+fn plain(frame: &Frame) -> SceneRenderer {
+    SceneRenderer::new_headless(
+        frame.device,
+        frame.queue,
+        FORMAT,
+        SIZE,
+        SIZE,
+        RendererConfig::default(),
+    )
+}
+
+/// What a frame said it built (#1077), as `<kind>: <detail>`.
+fn builds_noted(notes: &[flint_core::frame_notes::FrameNote]) -> Vec<String> {
+    use flint_core::frame_notes::NoteKind;
+    notes
+        .iter()
+        .filter(|n| matches!(n.kind, NoteKind::StyleBuild | NoteKind::PipelineBuild))
+        .map(|n| format!("{}: {}", n.kind.label(), n.detail))
+        .collect()
+}
+
+/// The frame notes `draw` makes on this thread.
+fn noted<R>(draw: impl FnOnce() -> R) -> (R, Vec<String>) {
+    flint_core::frame_notes::listen(true);
+    let made = draw();
+    let mut notes = Vec::new();
+    flint_core::frame_notes::take(&mut notes);
+    flint_core::frame_notes::listen(false);
+    (made, builds_noted(&notes))
+}
+
+/// #1121: a style prepared ahead is built on worker threads while frames
+/// go on drawing without it; the frame that then switches it on builds
+/// nothing (no style or ASCII pipeline in its notes, none counted) and
+/// draws the bytes a style built on its own frame draws.
+#[test]
+fn a_prepared_style_is_built_off_the_frame_and_draws_the_same() {
+    let Some(lease) = shared_gpu::lease_alone() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    let frame = Frame::new(&lease.gpu.device, &lease.gpu.queue);
+    let world = box_world();
+    // Every build counted: nothing kept from another test or renderer
+    pipeline_cache::set_enabled(false);
+    pipeline_cache::reset_counts();
+    let fresh = frame.draw(&mut ascii(&frame), &world, &camera(0.08));
+    assert_eq!(count("ASCII Pipeline").built, 1);
+
+    let mut renderer = plain(&frame);
+    let config = with_ascii(&renderer);
+    let started = renderer.prepare_styles(frame.device, &config);
+    assert!(started.contains(&"ascii"), "started {started:?}");
+    // Asked again while it builds: nothing more starts
+    assert!(
+        renderer.prepare_styles(frame.device, &config).is_empty(),
+        "a second prepare started a second build"
+    );
+    // Frames without ASCII go on; one of them takes the pass in once it's
+    // ready, and none waits for it
+    let since = std::time::Instant::now();
+    while !renderer.style_built("ascii") {
+        assert!(
+            since.elapsed() < std::time::Duration::from_secs(120),
+            "ASCII never arrived: still {:?}",
+            renderer.styles_preparing()
+        );
+        let ((), built) = noted(|| {
+            frame.draw(&mut renderer, &world, &camera(0.08));
+        });
+        assert!(
+            !built
+                .iter()
+                .any(|n| n.contains("ascii") || n.contains("ASCII")),
+            "a frame without ASCII built or waited for it: {built:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(renderer.styles_preparing().is_empty());
+    assert_eq!(count("ASCII Pipeline").built, 2, "built once ahead");
+
+    // The frame that switches it on: nothing to build
+    renderer.set_post_process_config(config);
+    let (drawn, built) = noted(|| frame.draw(&mut renderer, &world, &camera(0.08)));
+    let built: Vec<_> = built
+        .into_iter()
+        .filter(|n| n.starts_with("style build") || n.contains("ASCII"))
+        .collect();
+    assert!(built.is_empty(), "the switch built: {built:?}");
+    assert_eq!(count("ASCII Pipeline").built, 2, "built again on the frame");
+    assert_eq!(drawn, fresh, "the prepared pass draws other bytes");
+}
+
+/// #1121: a frame that needs a style still building ahead waits for that
+/// build instead of starting its own: each ASCII pipeline is built once,
+/// and the frame draws what a style built on it draws.
+#[test]
+fn a_frame_that_needs_a_style_still_preparing_waits_for_it() {
+    let Some(lease) = shared_gpu::lease_alone() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    let frame = Frame::new(&lease.gpu.device, &lease.gpu.queue);
+    let world = box_world();
+    pipeline_cache::set_enabled(false);
+    let fresh = frame.draw(&mut ascii(&frame), &world, &camera(0.08));
+    pipeline_cache::reset_counts();
+
+    let mut renderer = plain(&frame);
+    let config = with_ascii(&renderer);
+    renderer.prepare_styles(frame.device, &config);
+    // At once: ASCII's dozen pipelines take far longer than this
+    renderer.set_post_process_config(config);
+    let (drawn, built) = noted(|| frame.draw(&mut renderer, &world, &camera(0.08)));
+    let styles: Vec<_> = built
+        .into_iter()
+        .filter(|n| n.starts_with("style build"))
+        .collect();
+    // It waited (or, on a machine that builds faster than it asks, found
+    // the pass ready): never built it on the frame itself
+    assert!(
+        styles.iter().all(|n| n.contains("waited for its prepare")),
+        "the frame built it itself: {styles:?}"
+    );
+    let glyph = count("ASCII Pipeline");
+    assert_eq!(glyph.built, 1, "built twice: {glyph:?}");
+    assert!(renderer.style_built("ascii"));
+    assert!(renderer.styles_preparing().is_empty());
+    assert_eq!(drawn, fresh);
+}
+
+/// `style`'s table on, with `reveal` at `amount` (#406), in `config`.
+fn with_reveal(
+    mut config: flint_render::PostProcessConfig,
+    style: &str,
+    amount: f64,
+) -> flint_render::PostProcessConfig {
+    config.styles.set_enabled(style, true);
+    config
+        .styles
+        .set_reveal(style, "reveal", &toml::Value::Float(amount), true)
+        .expect("a reveal key");
+    config
+}
+
+/// Draw frames of `renderer` until `labels` are each built once, none of
+/// those frames building one itself: what a worker builds ahead.
+fn draw_until_built(frame: &Frame, renderer: &mut SceneRenderer, labels: &[&str]) {
+    let world = box_world();
+    let since = std::time::Instant::now();
+    while labels.iter().any(|l| count(l).built == 0) {
+        assert!(
+            since.elapsed() < std::time::Duration::from_secs(120),
+            "never built ahead: {:?}",
+            labels.iter().map(|l| (*l, count(l))).collect::<Vec<_>>()
+        );
+        let ((), built) = noted(|| {
+            frame.draw(renderer, &world, &camera(0.08));
+        });
+        assert!(
+            !built.iter().any(|n| labels.iter().any(|l| n.contains(l))),
+            "a frame built what was building ahead: {built:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// #1159: a scene whose style waits at `reveal = 0` has its reveal draw
+/// built ahead with its styles, so the first frame the reveal lies
+/// between 0 and 1 (Plaintext's tear opening: 92 ms of "pipeline build
+/// Style Reveal Pipeline") builds nothing, and draws what a reveal built
+/// on its own frame draws.
+#[test]
+fn a_reveal_waiting_at_0_is_built_ahead_and_its_first_frame_builds_nothing() {
+    let Some(lease) = shared_gpu::lease_alone() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    let frame = Frame::new(&lease.gpu.device, &lease.gpu.queue);
+    let world = box_world();
+    pipeline_cache::set_enabled(false);
+    pipeline_cache::reset_counts();
+    const REVEAL: &str = "Style Reveal Pipeline";
+
+    // Without: the first frame half revealed builds the reveal draw
+    let mut fresh = plain(&frame);
+    let half = with_reveal(fresh.post_process_config().clone(), "invert", 0.5);
+    fresh.set_post_process_config(half.clone());
+    let (fresh_bytes, built) = noted(|| frame.draw(&mut fresh, &world, &camera(0.08)));
+    assert!(
+        built.iter().any(|n| n.contains(REVEAL)),
+        "the control frame didn't build its reveal: {built:?}"
+    );
+    pipeline_cache::reset_counts();
+
+    // With: the scene's own table, reveal 0, prepared at its entry
+    let mut renderer = plain(&frame);
+    let waiting = with_reveal(renderer.post_process_config().clone(), "invert", 0.0);
+    renderer.set_post_process_config(waiting.clone());
+    renderer.ensure_style_resources(frame.device);
+    renderer.prepare_styles(frame.device, &waiting);
+    draw_until_built(&frame, &mut renderer, &[REVEAL]);
+
+    // The tear opens: nothing to build, the same bytes
+    renderer.set_post_process_config(half);
+    let (drawn, built) = noted(|| frame.draw(&mut renderer, &world, &camera(0.08)));
+    assert!(
+        built.is_empty(),
+        "the reveal's first frame built: {built:?}"
+    );
+    assert_eq!(count(REVEAL).built, 1, "built again on the frame");
+    assert_eq!(drawn, fresh_bytes, "the prepared reveal draws other bytes");
+}
+
+/// #1159: a style named to preload (`preload_styles`) is built with every
+/// draw the stage gives a style, whatever its table says then: the blend,
+/// the reveal and the tear's. Plaintext switched `matrix` and `tron` on
+/// mid-film and tore them in; that frame now builds nothing.
+#[test]
+fn a_preloaded_style_gets_every_stage_draw_built_ahead() {
+    let Some(lease) = shared_gpu::lease_alone() else {
+        flint_render::gpu_select::skip_without_gpu("no GPU adapter");
+        return;
+    };
+    let frame = Frame::new(&lease.gpu.device, &lease.gpu.queue);
+    let world = box_world();
+    pipeline_cache::set_enabled(false);
+    pipeline_cache::reset_counts();
+    const DRAWS: [&str; 3] = [
+        "Style Blend Pipeline",
+        "Style Reveal Pipeline",
+        "Style Tear Blend Pipeline",
+    ];
+
+    let mut renderer = plain(&frame);
+    let mut later = renderer.post_process_config().clone();
+    later.styles.set_enabled("matrix", true);
+    let started = renderer.prepare_styles_with(frame.device, &later, &["matrix"]);
+    assert!(started.contains(&"matrix"), "started {started:?}");
+    draw_until_built(&frame, &mut renderer, &DRAWS);
+    let since = std::time::Instant::now();
+    while !renderer.style_built("matrix") {
+        assert!(since.elapsed() < std::time::Duration::from_secs(120));
+        frame.draw(&mut renderer, &world, &camera(0.08));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    // The script switches it on and tears it in: nothing to build
+    later.styles.set_follows_tear("matrix", true);
+    later.tear = 0.5;
+    renderer.set_post_process_config(later);
+    let ((), built) = noted(|| {
+        frame.draw(&mut renderer, &world, &camera(0.08));
+    });
+    assert!(built.is_empty(), "the torn matrix's frame built: {built:?}");
+    for label in DRAWS {
+        assert_eq!(count(label).built, 1, "{label} built twice");
+    }
 }

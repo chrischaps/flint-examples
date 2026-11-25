@@ -1,4 +1,5 @@
 use super::*;
+use crate::gpu_counts::CountedDevice;
 
 fn source(toml_text: &str, file: &str) -> Result<StyleSource, String> {
     let def: ShaderStyleDef = toml::from_str(toml_text).map_err(|e| e.to_string())?;
@@ -634,15 +635,11 @@ fn user_lines_map_back() {
     assert_eq!(c.text.lines().nth(c.prelude_lines), Some("a"));
 }
 
-fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    pollster::block_on(async {
-        let instance = crate::gpu_select::instance();
-        let adapter = crate::gpu_select::request_adapter(&instance, None).await?;
-        adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
-            .await
-            .ok()
-    })
+/// The binary's shared device (#1275), and the lease that holds it.
+fn device() -> Option<(crate::shared_gpu::Lease, wgpu::Device, wgpu::Queue)> {
+    let gpu = crate::shared_gpu::lease()?;
+    let (device, queue) = (gpu.gpu.device.clone(), gpu.gpu.queue.clone());
+    Some((gpu, device, queue))
 }
 
 /// Hot reload on a real device: a good build, a broken edit that keeps
@@ -650,7 +647,7 @@ fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
 #[test]
 fn hot_reload_keeps_the_last_good_build() {
     let mut reg = super::super::StyleRegistry::new();
-    let Some((device, _queue)) = device() else {
+    let Some((_gpu, device, _queue)) = device() else {
         crate::gpu_select::skip_without_gpu("no GPU adapter");
         return;
     };
@@ -816,7 +813,7 @@ impl<T: Unpin> std::future::Future for Late<T> {
 #[test]
 fn a_late_compiler_answer_settles_on_a_later_frame() {
     let mut reg = super::super::StyleRegistry::new();
-    let Some((device, _queue)) = device() else {
+    let Some((_gpu, device, _queue)) = device() else {
         crate::gpu_select::skip_without_gpu("no GPU adapter");
         return;
     };
@@ -1466,7 +1463,7 @@ fn a_reload_frees_the_old_install() {
 #[test]
 fn a_replaced_descriptor_is_built_again() {
     let mut reg = super::super::StyleRegistry::new();
-    let Some((device, _queue)) = device() else {
+    let Some((_gpu, device, _queue)) = device() else {
         crate::gpu_select::skip_without_gpu("no GPU adapter");
         return;
     };
@@ -1730,7 +1727,7 @@ fn style(p: StylePixel) -> vec4<f32> {
 /// level.
 #[test]
 fn a_mipped_image_uploads_its_chain() {
-    let Some((device, queue)) = device() else {
+    let Some((_gpu, device, queue)) = device() else {
         crate::gpu_select::skip_without_gpu("no GPU adapter");
         return;
     };
@@ -1749,7 +1746,7 @@ fn a_mipped_image_uploads_its_chain() {
     assert_eq!(chain.mip_level_count(), 3, "4x4, 2x2, 1x1");
     // Read the 1x1 level and a texel of level 0 back
     let read = |level: u32| -> [u8; 4] {
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = device.create_buffer_counted(&wgpu::BufferDescriptor {
             label: None,
             size: 256,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -2057,7 +2054,7 @@ fn image_options_find_their_folder_and_warn_on_strangers() {
 /// last good picture when a file breaks.
 #[test]
 fn images_load_follow_choices_and_reload() {
-    let Some((device, queue)) = device() else {
+    let Some((_gpu, device, queue)) = device() else {
         crate::gpu_select::skip_without_gpu("no GPU adapter");
         return;
     };
@@ -2331,4 +2328,96 @@ fn a_styles_files_are_named_with_forward_slashes() {
         let e = check(&s, user).unwrap_err();
         assert!(e.starts_with("demo/styles/x.wgsl:2:"), "{given}: {e}");
     }
+}
+
+/// `path` spelled from the working directory, as a player run from a
+/// project's root spells its styles (`styles/x.shader.toml`): `same_path`
+/// does its disk work only for relative paths.
+fn from_cwd(path: &std::path::Path) -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap();
+    let mut up = std::path::PathBuf::new();
+    let mut base = cwd.as_path();
+    while !path.starts_with(base) {
+        up.push("..");
+        base = base.parent().expect("a common root");
+    }
+    up.join(path.strip_prefix(base).unwrap())
+}
+
+/// A vfs that counts what it is asked, over the disk.
+#[derive(Default)]
+struct Counting(std::sync::atomic::AtomicUsize);
+
+impl flint_core::vfs::FileSource for Counting {
+    fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        flint_core::vfs::DiskSource.read(path)
+    }
+    fn read_dir(&self, path: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        flint_core::vfs::DiskSource.read_dir(path)
+    }
+    fn kind(&self, path: &std::path::Path) -> Option<flint_core::vfs::EntryKind> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        flint_core::vfs::DiskSource.kind(path)
+    }
+}
+
+/// #1121: the user-style reload poll runs a few times a second on the
+/// frame thread. For styles it has loaded it asks the disk nothing beyond
+/// `file_watch` (the player's watcher thread answers that): it compares a
+/// listed file with the loaded ones by spelling before `same_path`, whose
+/// working out reads the working directory and stats it, and works out its
+/// style folders once a scope. In the looks tour, with relative paths, that
+/// working out took 16-37 ms a style when other threads were busy on
+/// files, and stopped the game 150-260 ms a poll. With the old
+/// `loaded_from` this test counts 2 vfs calls for each loaded style a
+/// listed file is compared with and passed over.
+#[test]
+fn the_reload_poll_asks_nothing_of_the_disk_for_styles_it_has() {
+    let root = std::env::temp_dir().join(format!("flint-user-1121-{}", std::process::id()));
+    let styles = root.join("styles");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&styles).unwrap();
+    std::fs::write(root.join("flint.toml"), "").unwrap();
+    std::fs::write(styles.join("poll.wgsl"), PASSTHROUGH).unwrap();
+    for name in [
+        "utest_poll_a",
+        "utest_poll_b",
+        "utest_poll_c",
+        "utest_poll_d",
+    ] {
+        std::fs::write(
+            styles.join(format!("{name}.shader.toml")),
+            format!("version = 1\nname = \"{name}\"\nshader = \"poll.wgsl\"\n"),
+        )
+        .unwrap();
+    }
+    let scope = AssetScope::for_dir(&from_cwd(&root));
+    let mut reg = super::super::StyleRegistry::new();
+    assert!(reg.load_for(&scope).is_empty());
+    assert_eq!(reg.users().count(), 4);
+    // The first poll works the folders out
+    assert!(!reg.reload_changed_for(&scope).changed());
+
+    let counting = std::sync::Arc::new(Counting::default());
+    let source: std::sync::Arc<dyn flint_core::vfs::FileSource> = counting.clone();
+    flint_core::vfs::scoped(source, || {
+        for _ in 0..10 {
+            assert!(!reg.reload_changed_for(&scope).changed());
+        }
+    });
+    let asked = counting.0.load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(asked, 0, "10 polls asked the vfs {asked} times");
+
+    // And it still sees an edit
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(
+        styles.join("utest_poll_c.shader.toml"),
+        "version = 1\nname = \"utest_poll_c\"\nshader = \"poll.wgsl\"\n[params.k]\ndefault = 1\nmin = 0\nmax = 2\n",
+    )
+    .unwrap();
+    let reload = reg.reload_changed_for(&scope);
+    assert_eq!(reload.replaced, vec!["utest_poll_c".to_string()]);
+    let _ = std::fs::remove_dir_all(&root);
 }

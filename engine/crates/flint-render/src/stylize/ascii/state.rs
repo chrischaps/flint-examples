@@ -1,6 +1,7 @@
 //! The style's state: ramps, fonts, palettes, the text capture and each
 //! variant's row (moved from `ascii.rs`, #742).
 
+use crate::gpu_counts::CountedDevice;
 use super::*;
 
 /// Up to [`MAX_RAMP`] steps of `ramp`, evenly resampled when longer: each
@@ -79,6 +80,10 @@ pub(super) struct Ascii {
     /// Per-entity variant cells (#313): their pass and its two entries.
     pub(super) variant_cells_pipeline: std::sync::Arc<wgpu::RenderPipeline>,
     pub(super) variant_cells: Mutex<[Option<Owned>; 2]>,
+    /// Which snapping variant holds each cell (#929): its pass and state,
+    /// a band of rows a snapping grid.
+    pub(super) snap_owner_pipeline: std::sync::Arc<wgpu::RenderPipeline>,
+    pub(super) snap_owners: Mutex<Option<Owned>>,
     /// The dissolve's order and rank state (#398), a band of rows per
     /// dissolving variant.
     pub(super) dissolve_order_pipeline: std::sync::Arc<wgpu::RenderPipeline>,
@@ -113,6 +118,8 @@ pub(super) struct Ascii {
     pub(super) blit: kit::Blit,
     pub(super) fonts: Mutex<Fonts>,
     pub(super) history: Mutex<History>,
+    /// History taken from a frame capture (#1136), until the next frame.
+    pub(super) imported: crate::stylize::history::PendingHistory,
     /// The mask's outlines (#743, `ascii_edge_outline.wgsl`), a fragment a
     /// depth pixel into `outlines`, drawn only while the mask is bound.
     pub(super) outline_pipeline: std::sync::Arc<wgpu::RenderPipeline>,
@@ -151,6 +158,9 @@ pub(super) struct Ascii {
     /// Last frame's edge cells and slots, copied before this frame's
     /// passes write theirs, and whether they follow on (#477).
     pub(super) edge_past: Mutex<EdgePast>,
+    /// The textures above as a frame capture reads them (#1161), noted
+    /// after the pass that writes each.
+    pub(super) held: crate::stylize::HeldTargets,
     pub(super) edge_thin_uniforms: wgpu::Buffer,
     /// The glyph grid as text (#317): `fs_text` in ascii.wgsl, drawn only
     /// while `capture` is on, into `text` and copied to its read-back.
@@ -186,7 +196,7 @@ pub(super) struct TextCapture {
 
 impl TextCapture {
     pub(super) fn new(device: &wgpu::Device, grid: [u32; 2]) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
+        let texture = device.create_texture_counted(&wgpu::TextureDescriptor {
             label: Some("ASCII Text"),
             size: wgpu::Extent3d {
                 width: grid[0].max(1),
@@ -203,7 +213,7 @@ impl TextCapture {
         let view = texture.create_view(&Default::default());
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let row_bytes = (grid[0].max(1) * TEXT_TEXEL_BYTES).div_ceil(align) * align;
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = device.create_buffer_counted(&wgpu::BufferDescriptor {
             label: Some("ASCII Text Read-back"),
             size: (row_bytes * grid[1].max(1)) as u64,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
@@ -322,6 +332,7 @@ pub(super) fn variant_uniform(
         _pad_dissolve: [0; 2],
         // The caller's (#507)
         bounds: [0.0; 4],
+        owner: [0; 4],
     }
 }
 
@@ -528,7 +539,7 @@ pub(super) fn cells_bind(
     variant: u64,
 ) -> Arc<wgpu::BindGroup> {
     frame.bind(name, variant, || {
-        frame.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        frame.device.create_bind_group_counted(&wgpu::BindGroupDescriptor {
             label: Some(name),
             layout,
             entries: &[wgpu::BindGroupEntry {
